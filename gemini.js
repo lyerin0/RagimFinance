@@ -22,7 +22,16 @@ const Gem = {
     return this.cfg;
   },
   save(){ localStorage.setItem('sosiktong.gem', JSON.stringify(this.cfg)); },
-  ready(){ return !!(this.cfg.kInv && !this.dead); },
+  /* 호출 자격: 키가 있고, 관리자이고, 시세 방송을 맡은 창일 것.
+     친구들 브라우저는 Gemini 를 아예 안 부른다 — 판정 결과는
+     Firestore 를 타고 전파되므로 한 명만 부르면 충분하고,
+     그래야 토큰이 접속자 수만큼 낭비되지 않는다. */
+  ready(){
+    if(!this.cfg.kInv || this.dead) return false;
+    if(!S.me.admin) return false;
+    if(window.FB && FB.on && FB.guest) return false;
+    return true;
+  },
 
   /* ── 저수준 호출 ──────────────────────────────────────
      AI Studio 키는 두 형식이 돈다:
@@ -231,6 +240,8 @@ ${macroCtx}
     const c = this.cfg;
     openModal('Gemini 설정', `
       <p style="font-size:11px;color:var(--ink-dim);line-height:1.7">
+        <b>관리자 창에서만</b> Gemini 를 호출합니다. 친구들은 키를 넣을
+        필요가 없고, 판정 결과만 Firestore 로 받아봅니다.<br><br>
         키는 <b>이 브라우저에만</b> 저장됩니다. 저장소에 올라가지 않으니
         public repo 여도 안전합니다. 친구들은 각자 한 번씩 넣으면 됩니다.</p>
       <div class="fld"><label>투자자 조종 키 (임팩트 판정)</label>
