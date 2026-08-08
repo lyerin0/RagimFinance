@@ -7,12 +7,29 @@
    3. Gemini는 숫자만 뱉는다. 10만 명 시뮬레이션은 로컬이 한다.
    ═══════════════════════════════════════════════════════════════ */
 
+/* 무료 티어 실측 한도: 분당 10콜, 하루 250콜.
+   예전 설정(15초에 1콜)은 시간당 240콜이라 한 시간이면 하루치가 증발한다.
+   아래 값은 하루 종일 켜둬도 250콜 안에서 끝나도록 잡았다. */
+const MIN_GAP   = 60000;        // 콜 사이 최소 간격 1분
+const AUDIT_GAP = 30*60*1000;   // 젬민이 감사 30분
+const MACRO_GAP = 3*60*60*1000; // 국가 소식·환율 3시간
+const DAY_CAP   = 200;          // 하루 상한 (250 중 여유를 남긴다)
+
 const Gem = {
   cfg: {},
   calls: 0,
   lastCall: 0,
+  backoff: 0,
   jobs: { macroAt: 0, auditAt: 0 },
   dead: false,
+
+  /* 하루 사용량을 날짜와 함께 기록해 상한을 넘지 않게 한다 */
+  today(){
+    const d = new Date().toISOString().slice(0,10);
+    if(this.cfg.day !== d){ this.cfg.day = d; this.cfg.used = 0; this.save(); }
+    return this.cfg.used || 0;
+  },
+  spend(){ this.cfg.used = this.today() + 1; this.save(); },
 
   /* ── 설정 ────────────────────────────────────────────── */
   load(){
@@ -52,21 +69,30 @@ const Gem = {
         this.dead = true;
         toast('Gemini 키가 거부됐습니다 — 설정에서 다시 확인하세요');
       } else if(r.status===429){
-        this.lastCall = Date.now() + 45000;   // 쿼터 초과 시 45초 물러선다
+        // 분당 한도인지 하루 한도인지 알 수 없으므로 점점 길게 물러난다
+        this.backoff = Math.min((this.backoff || 60000) * 2, 60*60*1000);
+        this.lastCall = Date.now() + this.backoff;
+        console.warn(`[Gem] 쿼터 초과 — ${Math.round(this.backoff/60000)}분 대기`);
       }
       throw new Error(`${r.status} ${t.slice(0,160)}`);
     }
-    this.calls++;
+    this.calls++; this.spend(); this.backoff = 0;
     const d = await r.json();
     return (d.candidates?.[0]?.content?.parts || [])
       .map(p => p.text || '').join('').trim();
   },
 
   /* JSON만 받아내는 래퍼. 코드펜스·설명문 다 벗겨낸다. */
-  async json(key, prompt, { grounding=false, maxTokens=700 } = {}){
+  async json(key, prompt, { grounding=false, maxTokens=1400 } = {}){
     const body = {
       contents: [{ role:'user', parts:[{ text: prompt }] }],
-      generationConfig: { temperature: 0.75, maxOutputTokens: maxTokens }
+      generationConfig: {
+        temperature: 0.75,
+        maxOutputTokens: maxTokens,
+        // 2.5 계열은 기본으로 '사고 토큰'을 쓴다. 그게 출력 예산을 먹어
+        // 응답이 잘려 나가면서 JSON 파싱이 실패한다. 아예 끈다.
+        thinkingConfig: { thinkingBudget: 0 }
+      }
     };
     // grounding 을 켜면 responseMimeType 을 못 쓴다 → 텍스트로 받아 직접 판다
     if(grounding) body.tools = [{ google_search: {} }];
@@ -77,8 +103,9 @@ const Gem = {
     const s = cut.indexOf('{'), a = cut.indexOf('[');
     const st = (a >= 0 && (a < s || s < 0)) ? a : s;
     const en = Math.max(cut.lastIndexOf('}'), cut.lastIndexOf(']'));
-    if(st < 0 || en < st) throw new Error('JSON 파싱 실패: ' + cut.slice(0,120));
-    return JSON.parse(cut.slice(st, en+1));
+    if(st < 0 || en < st) throw new Error('JSON 파싱 실패: ' + (cut.slice(0,120) || '(빈 응답)'));
+    try{ return JSON.parse(cut.slice(st, en+1)); }
+    catch(e){ throw new Error('JSON 파싱 실패: ' + cut.slice(0,160)); }
   },
 
   /* ── 1) 뉴스 임팩트 판정 (배치) ───────────────────────
@@ -215,18 +242,22 @@ ${macroCtx}
      이것만으로 시간당 최대 240콜, 실제로는 훨씬 적다. */
   async pump(){
     if(!this.ready() || this.busy) return;
-    if(Date.now() - this.lastCall < 15000) return;
+    if(Date.now() - this.lastCall < MIN_GAP) return;
+    if(this.today() >= DAY_CAP){
+      if(!this._capped){ this._capped = true; toast('오늘 Gemini 호출 한도에 도달했습니다'); }
+      return;
+    }
     this.busy = true;
     try{
       const now = Date.now();
       let did = await this.scoreBatch();
       if(!did && now > this.jobs.auditAt){
         did = await this.audit();
-        if(did) this.jobs.auditAt = now + 10*60*1000;   // 10분
+        if(did) this.jobs.auditAt = now + AUDIT_GAP;
       }
       if(!did && now > this.jobs.macroAt){
         did = await this.macro();
-        if(did) this.jobs.macroAt = now + 60*60*1000;   // 1시간
+        if(did) this.jobs.macroAt = now + MACRO_GAP;
       }
       if(did) this.lastCall = Date.now();
     }catch(e){
@@ -270,13 +301,14 @@ ${macroCtx}
       <div class="fld"><label>모델</label>
         <input id="g_m" value="${c.model}"></div>
       <p style="font-size:11px;color:var(--ink-dim);line-height:1.7">
-        이번 세션 호출 <b class="mono">${this.calls}</b>회.
-        스케줄러가 15초당 1콜로 제한하고, 임팩트 판정은 8건씩 묶어 보냅니다.</p>`,
+        오늘 <b class="mono">${this.today()}</b> / ${DAY_CAP}회 사용 (무료 한도 250).
+        1분에 1콜로 제한하고, 임팩트 판정은 8건씩 묶어 보냅니다.
+        감사는 30분, 국가 소식은 3시간 간격입니다.</p>`,
     () => {
       c.kInv = modal.querySelector('#g_i').value.trim();
       c.kAud = modal.querySelector('#g_a').value.trim();
       c.model = modal.querySelector('#g_m').value.trim() || 'gemini-2.5-flash';
-      this.dead = false; this.lastCall = 0; this.save();
+      this.dead = false; this.lastCall = 0; this.backoff = 0; this._capped = false; this.save();
       toast(c.kInv ? 'Gemini 활성화' : 'Gemini 비활성 — 로컬 채점으로 동작합니다');
       window.renderGemBadge();
       if(c.kInv) this.selftest();
