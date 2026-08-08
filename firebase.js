@@ -25,7 +25,7 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-08e';
+const FB_BUILD = '2026-08-08f';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
@@ -105,10 +105,12 @@ const FB = {
         }
         let co = S.companies.find(c => c.id === id);
         if(!co){
-          // 처음 보는 기업 — 로컬에 껍데기를 만들고 시세는 tape 가 채운다
-          co = { id, price:d.price0||50000, prev:d.price0||50000, fair:d.price0||50000,
+          /* 처음 보는 기업. 여기서 seed() 로 가짜 과거를 만들면 안 된다 —
+             새로고침할 때마다 다른 난수 과거가 생겨서 차트가 매번 바뀌고,
+             사람마다 다른 그림을 보게 된다. 캔들은 tape 방송으로만 채운다. */
+          const p0 = d.price0 || 50000;
+          co = { id, price:p0, prev:p0, fair:p0,
                  mom:0, sent:[0,0,0,0,0,0], candles:[], cur:null, tick:0 };
-          seed(co, 140);
           S.companies.push(co);
         }
         Object.assign(co, {
@@ -211,7 +213,8 @@ const FB = {
       const s = await getDoc(doc(this.db,'world','tape'));
       if(!s.exists() || !s.data().at) return;
       const gap = Date.now() - s.data().at;
-      if(gap > 20000){
+      // 새로고침 정도의 짧은 공백까지 따라잡으면 차트가 계속 흔들린다
+      if(gap > 60000){
         const bars = window.catchUp(gap);
         if(bars) this.tapeAt = 0;      // 결과를 곧바로 방송한다
       }
@@ -222,6 +225,8 @@ const FB = {
      기업이 몇 개든 문서 하나에 담는다. 쓰기 1회로 전부 처리. */
   async pushTape(){
     if(!this.on || this.guest) return;
+    // 호스트인데 캔들이 비어 있으면(첫 상장 직후) 출발점을 한 번만 만든다
+    S.companies.forEach(c => { if(!c.candles.length) seed(c, 60); });
     if(Date.now() - this.tapeAt < TAPE_MS) return;
     this.tapeAt = Date.now();
     const px = {};
