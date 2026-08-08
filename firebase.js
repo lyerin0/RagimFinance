@@ -25,7 +25,10 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const TAPE_MS  = 12000;   // 시세 방송 주기. 아래 '무료 한도' 주석 참고
+const FB_BUILD = '2026-08-08d';
+console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
+
+const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
 const LEASE_MS = 15000;   // 호스트 임대 시간
 
 const FB = {
@@ -47,7 +50,7 @@ const FB = {
     this.uid = auth.currentUser.uid;
     S.me.id  = this.uid;
     this.on  = true;
-    S.me.admin = false;          // 명부에 등재된 사람만 관리자가 된다
+    this.syncAdmin(true);
 
     // 내 이름을 사용자 명부에 올린다. 소유권 이전 대상 목록이 여기서 나온다.
     await setDoc(doc(this.db,'users',this.uid),
@@ -58,6 +61,23 @@ const FB = {
     this.beat();
     console.info('[FB] 연결됨', this.uid.slice(0,6));
     toast('공유 세계에 접속했습니다');
+  },
+
+  /* 관리자 판별. 화면을 여는 근거일 뿐이고, 실제 차단은
+     firestore.rules 의 같은 목록이 서버에서 한다.
+     beat() 에서 매번 다시 확인하므로 어떤 이유로 풀려도 복구된다. */
+  syncAdmin(announce){
+    S.admins = window.ADMIN_UIDS || [];
+    const was = S.me.admin;
+    S.me.admin = S.admins.includes(this.uid);
+    if(S.me.admin && (announce || !was)){
+      setTimeout(()=>toast('관리자로 접속했습니다'), 600);
+    }
+    if(!S.me.admin && announce){
+      console.warn('[FB] 관리자 아님. 내 ID:', this.uid,
+                   '/ ADMIN_UIDS:', S.admins);
+    }
+    return S.me.admin;
   },
 
   /* ── 구독 ──────────────────────────────────────────── */
@@ -110,15 +130,6 @@ const FB = {
       S.users = snap.docs.map(d => ({ id:d.id, name:d.data().name || '이름없음' }));
     });
 
-    // 관리자 명단 — Firestore 의 world/config 문서가 유일한 근거다
-    onSnapshot(doc(this.db,'world','config'), snap => {
-      const list = (snap.exists() && snap.data().admins) || [];
-      S.admins = list;
-      const was = S.me.admin;
-      S.me.admin = list.includes(this.uid);
-      if(!was && S.me.admin) toast('관리자로 확인되었습니다');
-    });
-
     // 시세 방송 — 게스트만 받아 적는다
     onSnapshot(doc(this.db,'world','tape'), snap => {
       if(!snap.exists() || !this.guest) return;
@@ -140,13 +151,18 @@ const FB = {
      아무나 가져갈 수 있고, 잡은 사람이 시뮬레이션을 돌린다. */
   async beat(){
     if(!this.on) return;
+    this.syncAdmin(false);
     const ref = doc(this.db,'world','lock');
     try{
       const mine = await runTransaction(this.db, async tx => {
         const s = await tx.get(ref);
         const now = Date.now();
         const d = s.exists() ? s.data() : null;
-        const free = !d || !d.at || (now - d.at) > LEASE_MS;
+        // 관리자가 우선권을 갖는다. Gemini 호출이 호스트 창에서만
+        // 일어나므로, 일반 친구가 호스트를 잡으면 AI 가 멈춘다.
+        // 그래서 비관리자는 임대가 두 배로 오래 비어 있을 때만 잡는다.
+        const wait = S.me.admin ? LEASE_MS : LEASE_MS * 2;
+        const free = !d || !d.at || (now - d.at) > wait;
         if(free || d.host === this.uid){
           tx.set(ref, { host:this.uid, at:now });
           return true;
@@ -156,7 +172,7 @@ const FB = {
       const was = this.guest;
       this.guest = !mine;
       if(was !== this.guest){
-        toast(mine ? '이 창이 호스트가 되었습니다 (시뮬레이션 담당)'
+        toast(mine ? '이 창이 호스트가 되었습니다 (시뮬레이션·AI 담당)'
                    : '다른 사람이 호스트입니다 (시세 수신)');
         renderHostBadge();
       }
@@ -226,10 +242,11 @@ setInterval(() => FB.pushTape(), 2000);
 /* ═══════════════════════════════════════════════════════════════
    무료 한도 계산 (Spark 플랜: 쓰기 2만/일, 읽기 5만/일)
 
-   TAPE_MS = 12초  →  하루 7,200회 쓰기.        ✅ 여유
-   구독자 5명       →  7,200 × 5 = 36,000 읽기.  ✅ 아슬하게 통과
-   구독자 8명       →  57,600 읽기.              ❌ 초과
+   TAPE_MS = 6초  →  하루 14,400회 쓰기.        ✅ 한도 2만 안쪽
+   구독자 3명      →  14,400 × 3 = 43,200 읽기.  ✅ 한도 5만 안쪽
+   구독자 4명      →  57,600 읽기.               ❌ 초과
 
-   친구가 6명 넘어가면 TAPE_MS 를 20000 으로 올리세요.
-   차트가 20초마다 갱신되지만 한도는 넉넉해집니다.
+   친구가 4명 이상 되면 TAPE_MS 를 12000 으로 되돌리세요.
+   쓰기 7,200 · 읽기 36,000 이라 5명까지 버팁니다.
+   (하루 종일 켜뒀을 때 기준이라 실제로는 더 여유가 있습니다)
    ═══════════════════════════════════════════════════════════════ */
