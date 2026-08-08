@@ -25,7 +25,7 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-08g';
+const FB_BUILD = '2026-08-09b';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
@@ -101,7 +101,20 @@ const FB = {
       snap.docChanges().forEach(ch => {
         const d = ch.doc.data(), id = ch.doc.id;
         if(ch.type === 'removed'){
-          S.companies = S.companies.filter(c => c.id !== id); return;
+          // 상장폐지된 종목의 포지션은 마지막 가격으로 청산해 돌려준다
+          const co = S.companies.find(c => c.id === id);
+          const mine = S.positions.filter(p => p.cid === id);
+          if(mine.length){
+            mine.forEach(p => { S.me.cash += p.margin + pnlOf(p, co); });
+            S.positions = S.positions.filter(p => p.cid !== id);
+            this.saveMe(); renderPos(); renderWallet();
+            toast('상장폐지된 종목의 포지션이 청산되었습니다');
+          }
+          S.companies = S.companies.filter(c => c.id !== id);
+          S.news = S.news.filter(n => n.cid !== id);
+          if(S.sel && S.sel.id === id) S.sel = S.companies[0] || null;
+          renderNews();
+          return;
         }
         let co = S.companies.find(c => c.id === id);
         if(!co){
@@ -203,7 +216,12 @@ const FB = {
                    : '다른 사람이 호스트입니다 (시세 수신)');
         renderHostBadge();
       }
-    }catch(e){ console.warn('[FB] lock', e.message); }
+    }catch(e){
+      // 창을 여러 개 띄우면 임대권 경합으로 failed-precondition 이 난다.
+      // 다음 beat 에서 다시 시도하면 되므로 조용히 넘긴다.
+      if(!/failed-precondition|aborted/i.test(e.message))
+        console.warn('[FB] lock', e.message);
+    }
   },
 
   /* 아무도 없던 동안의 장세를 따라잡는다.
@@ -266,6 +284,26 @@ const FB = {
       owner:co.owner, ownerName:co.ownerName, at:Date.now()
     });
   },
+  async editCompany(co){
+    if(!this.on) return;
+    await updateDoc(doc(this.db,'companies',co.id), {
+      name:co.name, ticker:co.ticker, img:co.img, desc:co.desc, country:co.country
+    }).catch(e => toast('수정 실패 — 소유주만 고칠 수 있습니다'));
+  },
+
+  /* 상장폐지. 기업 문서와 관련 기사를 지우고, 방송에서도 뺀다.
+     다른 사람의 포지션은 각자 users 문서에 있어서 여기서 못 지운다.
+     대신 각 클라이언트가 없는 기업의 포지션을 스스로 정리한다. */
+  async delistCompany(cid){
+    if(!this.on) return;
+    try{
+      const gone = S.news.filter(n=>n.cid===cid).map(n=>n.id);
+      await deleteDoc(doc(this.db,'companies',cid));
+      await Promise.all(gone.map(id => deleteDoc(doc(this.db,'news',id)).catch(()=>{})));
+      this.tapeAt = 0;                      // 방송을 즉시 갱신해 목록에서 뺀다
+    }catch(e){ toast('상장폐지 실패 — 관리자만 가능합니다'); }
+  },
+
   async setOwner(cid, owner, ownerName){
     if(!this.on) return;
     await updateDoc(doc(this.db,'companies',cid), { owner, ownerName });
