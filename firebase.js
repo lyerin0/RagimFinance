@@ -19,13 +19,13 @@
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import {
-  getFirestore, doc, setDoc, updateDoc, deleteDoc, collection,
+  getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection,
   onSnapshot, runTransaction, serverTimestamp, query, orderBy, limit
 } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-08d';
+const FB_BUILD = '2026-08-08e';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
@@ -52,9 +52,23 @@ const FB = {
     this.on  = true;
     this.syncAdmin(true);
 
-    // 내 이름을 사용자 명부에 올린다. 소유권 이전 대상 목록이 여기서 나온다.
-    await setDoc(doc(this.db,'users',this.uid),
-      { name:S.me.name, at:Date.now() }, { merge:true }).catch(()=>{});
+    /* 지갑과 포지션을 서버에서 불러온다.
+       예전엔 이게 로컬에만 있어서, 가격은 서버 기준인데 진입가는
+       내 브라우저 기준이 되어 평가손익 부호가 뒤집혔다. */
+    try{
+      const mine = await getDoc(doc(this.db,'users',this.uid));
+      if(mine.exists()){
+        const d = mine.data();
+        if(typeof d.cash === 'number') S.me.cash = d.cash;
+        if(Array.isArray(d.positions)) S.positions = d.positions;
+        if(d.name) S.me.name = d.name;
+      }
+    }catch(e){ console.warn('[FB] 지갑 로드', e.message); }
+
+    await setDoc(doc(this.db,'users',this.uid), {
+      name:S.me.name, cash:S.me.cash, positions:S.positions, at:Date.now()
+    }, { merge:true }).catch(()=>{});
+    renderWallet(); renderPos();
 
     this.listen();
     setInterval(() => this.beat(), 4000);
@@ -139,7 +153,14 @@ const FB = {
         const co = S.companies.find(c => c.id === cid);
         if(!co) return;
         co.price = v.p; co.prev = v.prev; co.fair = v.f;
-        if(v.k){ try{ co.candles = JSON.parse(v.k); }catch(e){} }
+        if(v.k){
+          try{
+            // 방송은 [o,h,l,c,v] 배열로 압축돼서 온다
+            const rows = JSON.parse(v.k);
+            if(rows.length) co.candles = rows.map(r =>
+              Array.isArray(r) ? {o:r[0],h:r[1],l:r[2],c:r[3],v:r[4]} : r);
+          }catch(e){}
+        }
         co.cur = null; co.tick = 0;
       });
       if(S.sel){ renderHead(); paint(); }
@@ -171,12 +192,30 @@ const FB = {
       });
       const was = this.guest;
       this.guest = !mine;
+      if(mine && !this.caught) this.doCatchUp();
       if(was !== this.guest){
         toast(mine ? '이 창이 호스트가 되었습니다 (시뮬레이션·AI 담당)'
                    : '다른 사람이 호스트입니다 (시세 수신)');
         renderHostBadge();
       }
     }catch(e){ console.warn('[FB] lock', e.message); }
+  },
+
+  /* 아무도 없던 동안의 장세를 따라잡는다.
+     tape 문서의 마지막 기록 시각과 지금을 비교해 그만큼 몰아서 돌린다.
+     정적 호스팅에는 서버가 없으므로 이게 '꺼도 돌아간다'의 현실적인 답이다. */
+  async doCatchUp(){
+    if(this.caught) return;
+    this.caught = true;
+    try{
+      const s = await getDoc(doc(this.db,'world','tape'));
+      if(!s.exists() || !s.data().at) return;
+      const gap = Date.now() - s.data().at;
+      if(gap > 20000){
+        const bars = window.catchUp(gap);
+        if(bars) this.tapeAt = 0;      // 결과를 곧바로 방송한다
+      }
+    }catch(e){ console.warn('[FB] catchUp', e.message); }
   },
 
   /* ── 시세 방송 (호스트만) ──────────────────────────────
@@ -201,6 +240,12 @@ const FB = {
   },
 
   /* ── 쓰기 ─────────────────────────────────────────────── */
+  async saveMe(){
+    if(!this.on) return;
+    await setDoc(doc(this.db,'users',this.uid), {
+      name:S.me.name, cash:S.me.cash, positions:S.positions, at:Date.now()
+    }, { merge:true }).catch(e => console.warn('[FB] 지갑 저장', e.message));
+  },
   async setMyName(name){
     if(!this.on) return;
     await setDoc(doc(this.db,'users',this.uid), { name, at:Date.now() }, { merge:true });
@@ -238,6 +283,7 @@ window.renderHostBadge = () => {
 
 FB.start().then(renderHostBadge).catch(e => console.warn('[FB]', e.message));
 setInterval(() => FB.pushTape(), 2000);
+setInterval(() => { if(FB.on) FB.saveMe(); }, 45000);   // 지갑 보험 저장
 
 /* ═══════════════════════════════════════════════════════════════
    무료 한도 계산 (Spark 플랜: 쓰기 2만/일, 읽기 5만/일)
