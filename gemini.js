@@ -235,6 +235,24 @@ ${macroCtx}
     }finally{ this.busy = false; }
   },
 
+  /* 저장 직후 키가 실제로 통하는지 한 번 찔러본다.
+     여기서 실패하면 소식통에 글을 쓰기 전에 원인을 알 수 있다. */
+  async selftest(){
+    try{
+      const d = await this.json(this.cfg.kInv,
+        '{"ok":true} 만 출력하라. 다른 말은 쓰지 마라.', { maxTokens: 40 });
+      toast(d ? 'Gemini 연결 확인됨' : 'Gemini 응답이 비어 있습니다');
+    }catch(e){
+      console.warn('[Gem] 자체 점검 실패:', e.message);
+      const code = (e.message.match(/^\d+/) || [''])[0];
+      toast(
+        code === '401' || code === '403' ? 'Gemini 키가 거부됐습니다 — API key 를 새로 발급하세요'
+      : code === '404' ? `모델 이름이 틀렸습니다 — ${this.cfg.model} 를 확인하세요`
+      : code === '429' ? '쿼터 초과 — 잠시 뒤 다시 시도됩니다'
+      : 'Gemini 연결 실패 — 콘솔의 [Gem] 로그를 확인하세요');
+    }
+  },
+
   /* ── 설정 UI ─────────────────────────────────────────── */
   panel(){
     const c = this.cfg;
@@ -243,7 +261,8 @@ ${macroCtx}
         <b>관리자 창에서만</b> Gemini 를 호출합니다. 친구들은 키를 넣을
         필요가 없고, 판정 결과만 Firestore 로 받아봅니다.<br><br>
         키는 <b>이 브라우저에만</b> 저장됩니다. 저장소에 올라가지 않으니
-        public repo 여도 안전합니다. 친구들은 각자 한 번씩 넣으면 됩니다.</p>
+        public repo 여도 안전합니다. 다른 기기에서 관리자로 접속하면
+        거기서 한 번 더 넣어야 합니다.</p>
       <div class="fld"><label>투자자 조종 키 (임팩트 판정)</label>
         <input id="g_i" type="password" value="${c.kInv||''}" placeholder="AIza… 또는 AQ.…"></div>
       <div class="fld"><label>젬민이 키 (허점 발견 · 기사)</label>
@@ -257,9 +276,10 @@ ${macroCtx}
       c.kInv = modal.querySelector('#g_i').value.trim();
       c.kAud = modal.querySelector('#g_a').value.trim();
       c.model = modal.querySelector('#g_m').value.trim() || 'gemini-2.5-flash';
-      this.dead = false; this.save();
+      this.dead = false; this.lastCall = 0; this.save();
       toast(c.kInv ? 'Gemini 활성화' : 'Gemini 비활성 — 로컬 채점으로 동작합니다');
       window.renderGemBadge();
+      if(c.kInv) this.selftest();
     }, '저장');
   }
 };
