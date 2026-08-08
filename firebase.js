@@ -25,7 +25,7 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-08f';
+const FB_BUILD = '2026-08-08g';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
@@ -131,10 +131,13 @@ const FB = {
         if(i >= 0){
           // 판정 결과가 도착한 경우 — 가격 반영은 호스트만 한다
           const was = S.news[i].impact;
-          Object.assign(S.news[i], d, { id });
+          const fired = S.news[i].fired;
+          Object.assign(S.news[i], d, { id, fired });
           if(!this.guest && was === null && d.impact !== null) fire(S.news[i]);
         } else {
-          S.news.unshift({ ...d, id, fresh:true });
+          const n = { ...d, id, fresh:true };
+          S.news.unshift(n);
+          if(!this.guest && n.impact !== null && n.impact !== undefined) fire(n);
         }
       });
       S.news.sort((a,b) => b.ts - a.ts);
