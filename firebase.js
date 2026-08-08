@@ -25,7 +25,7 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-09b';
+const FB_BUILD = '2026-08-09e';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
@@ -163,6 +163,13 @@ const FB = {
     });
 
     // 시세 방송 — 게스트만 받아 적는다
+    /* 비상 개폐는 모두가 같은 값을 봐야 한다. 관리자만 쓰고 전원이 읽는다. */
+    onSnapshot(doc(this.db,'world','market'), snap => {
+      const d = snap.data();
+      MK.ov = (d && d.mode && Date.now() < d.until) ? { mode:d.mode, until:d.until } : null;
+      MK.sync(true);
+    });
+
     onSnapshot(doc(this.db,'world','tape'), snap => {
       if(!snap.exists() || !this.guest) return;
       const t = snap.data();
@@ -302,6 +309,13 @@ const FB = {
       await Promise.all(gone.map(id => deleteDoc(doc(this.db,'news',id)).catch(()=>{})));
       this.tapeAt = 0;                      // 방송을 즉시 갱신해 목록에서 뺀다
     }catch(e){ toast('상장폐지 실패 — 관리자만 가능합니다'); }
+  },
+
+  async setMarket(ov){
+    if(!this.on) return;
+    await setDoc(doc(this.db,'world','market'),
+      ov ? { mode:ov.mode, until:ov.until, by:this.uid } : { mode:null, until:0, by:this.uid }
+    ).catch(e => toast('장 상태 저장 실패 — 관리자만 가능합니다'));
   },
 
   async setOwner(cid, owner, ownerName){
