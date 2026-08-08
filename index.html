@@ -272,7 +272,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-08c';
+const BUILD = '2026-08-08f';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -962,6 +962,19 @@ fetch('https://ipapi.co/json/').then(r=>r.json())
   .then(j=>{ if(j&&j.country_code) S.geo=j.country_code; }).catch(()=>{});
 
 document.getElementById('pop').textContent=POP.toLocaleString();
+
+/* Gemini 가 쿼터·오류로 응답하지 못하면 판정중 상태가 영원히 남는다.
+   2분이 지나면 로컬 채점으로 확정해서 뉴스가 갇히지 않게 한다. */
+setInterval(()=>{
+  const now=Date.now(); let hit=false;
+  S.news.forEach(n=>{
+    if(n.pending && now - n.ts > 120000){
+      window.applyScore(n.id, {impact: localScore(n.title+' '+n.body)});
+      hit=true;
+    }
+  });
+  if(hit) toast('AI 판정이 지연되어 임시 점수로 반영했습니다');
+}, 20000);
 
 let saveT=0;
 setInterval(()=>{
