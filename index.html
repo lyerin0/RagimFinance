@@ -272,19 +272,24 @@ const toast= m => { const t=document.getElementById('toast'); t.textContent=m; t
    1. 상태
    ═══════════════════════════════════════════════════════ */
 const S = {
-  me:        DB.get('me', {id:uid(), name:'투자자', admin:true, cash:10_000_000}),
-  companies: DB.get('companies', []),
-  news:      DB.get('news', []),
+  me:        DB.get('me', {id:uid(), name:'투자자', admin:false, cash:10_000_000}),
+  companies: window.FIREBASE_CONFIG ? [] : DB.get('companies', []),
+  news:      window.FIREBASE_CONFIG ? [] : DB.get('news', []),
   positions: DB.get('positions', []),
   fx:        DB.get('fx', 1380),
+  users:     [],
+  admins:    [],
   sel:       null,
   tool:      'cursor',
   draws:     DB.get('draws', {}),   // companyId -> [line]
   t0:        Date.now()
 };
 const persist = () => {
-  DB.set('me',S.me); DB.set('companies',S.companies); DB.set('news',S.news);
-  DB.set('positions',S.positions); DB.set('draws',S.draws); DB.set('fx',S.fx);
+  DB.set('me',S.me); DB.set('positions',S.positions);
+  DB.set('draws',S.draws); DB.set('fx',S.fx);
+  if(!window.FIREBASE_CONFIG){            // 서버 모드에선 기업·뉴스의 정본이 Firestore 다
+    DB.set('companies',S.companies); DB.set('news',S.news);
+  }
 };
 
 /* ═══════════════════════════════════════════════════════
@@ -703,25 +708,67 @@ document.getElementById('newPost').onclick=()=>{
 };
 
 document.getElementById('adminBtn').onclick=()=>{
-  const opts=S.companies.map(c=>`<option value="${c.id}">${c.name} — 현 소유주 ${c.ownerName}</option>`).join('');
+  const linked = window.FB && FB.on;
+  const myId   = linked ? FB.uid : S.me.id;
+
+  // 내가 소유한 기업만 넘길 수 있다
+  const mine = S.companies.filter(c => c.owner === myId);
+  const coOpts = mine.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')
+    || '<option value="">넘길 기업이 없습니다</option>';
+
+  // 접속한 적 있는 사람 명부에서 고른다
+  const others = (S.users||[]).filter(u => u.id !== myId);
+  const usrOpts = others.map(u=>`<option value="${u.id}">${esc(u.name)} · ${u.id.slice(0,6)}</option>`).join('')
+    || '<option value="">아직 다른 접속자가 없습니다</option>';
+
   openModal('관리자', `
     <div class="fld"><label>내 표시 이름</label><input id="a_nm" value="${esc(S.me.name)}"></div>
-    <div class="fld"><label>소유권 이전할 기업</label><select id="a_co">${opts||'<option>없음</option>'}</select></div>
-    <div class="fld"><label>넘겨받을 사용자 이름</label><input id="a_to" placeholder="비우면 내가 계속 보유"></div>
+
+    <div class="fld"><label>내 ID ${S.me.admin?'· 관리자':'· 일반 사용자'}</label>
+      <div style="display:flex;gap:6px">
+        <input id="a_id" class="mono" value="${myId}" readonly style="flex:1;color:var(--ink-dim)">
+        <button class="btn ghost" id="a_cp" style="padding:6px 12px">복사</button></div></div>
+
+    ${S.me.admin ? '' : `<p style="font-size:11px;color:var(--amber);line-height:1.7">
+      관리자가 아닙니다. 기업을 상장하려면 Firebase 콘솔의
+      <b>world/config</b> 문서 <b>admins</b> 배열에 위 ID를 넣으세요.</p>`}
+
+    <hr style="border:none;border-top:1px solid var(--rule)">
+
+    <div class="fld"><label>넘길 기업 (내가 소유한 것만)</label>
+      <select id="a_co">${coOpts}</select></div>
+    <div class="fld"><label>넘겨받을 사람</label>
+      <select id="a_to"><option value="">— 이전하지 않음 —</option>${usrOpts}</select></div>
     <p style="font-size:11px;color:var(--ink-dim);line-height:1.7">
-      소유권을 넘기면 그 사람이 CEO가 되어 소식통에 기고할 수 있습니다.
-      돈은 오직 매매 손익으로만 늘어납니다.</p>`,
+      명부에는 이 사이트에 한 번이라도 접속한 사람이 뜹니다.
+      친구가 안 보이면 먼저 접속해서 이름을 저장하라고 하세요.
+      소유권을 넘기면 그 사람이 CEO가 되어 소식통에 기고할 수 있습니다.</p>`,
   ()=>{
-    S.me.name=modal.querySelector('#a_nm').value.trim()||'투자자';
-    const cid=modal.querySelector('#a_co').value, to=modal.querySelector('#a_to').value.trim();
-    if(to && cid){
-      const co=S.companies.find(c=>c.id===cid);
-      if(co){ co.owner='u_'+to; co.ownerName=to;
-        if(window.FB&&FB.on) FB.setOwner(co.id, co.owner, to);
-        toast(`${co.name} 소유권 → ${to}`); }
+    const nm = modal.querySelector('#a_nm').value.trim() || '투자자';
+    if(nm !== S.me.name){
+      S.me.name = nm;
+      if(linked) FB.setMyName(nm);
+    }
+    const cid = modal.querySelector('#a_co').value;
+    const toId = modal.querySelector('#a_to').value;
+    if(cid && toId){
+      const co = S.companies.find(c=>c.id===cid);
+      const u  = others.find(x=>x.id===toId);
+      if(co && u){
+        co.owner = u.id; co.ownerName = u.name;
+        if(linked) FB.setOwner(co.id, u.id, u.name)
+          .then(()=>toast(`${co.name} 소유권 → ${u.name}`))
+          .catch(()=>toast('이전 실패 — 소유주만 넘길 수 있습니다'));
+        else toast(`${co.name} 소유권 → ${u.name}`);
+      }
     }
     persist(); renderCos();
   },'저장');
+
+  modal.querySelector('#a_cp').onclick = e => {
+    e.preventDefault();
+    navigator.clipboard.writeText(myId).then(()=>toast('ID를 복사했습니다'));
+  };
 };
 
 /* 뉴스 등록.
@@ -816,13 +863,7 @@ setInterval(()=>{
 }, TICK_MS);
 
 /* 초기 부팅 */
-if(!window.FIREBASE_CONFIG && !S.companies.length){
-  ['라김전자','한빛중공업','서진바이오'].forEach((n,i)=>{
-    S.companies.push(makeCompany({name:n, ticker:['RGE','HBH','SJB'][i],
-      desc:'샘플 상장사', price:[68000,42000,115000][i], shares:[2_000_000,1_400_000,600_000][i]}));
-  });
-  persist();
-}
+if(!window.FIREBASE_CONFIG) S.me.admin = true;   // 로컬 단독 실행이면 혼자 다 한다
 fit(); if(S.companies.length) select(S.companies[0].id); renderWallet(); renderPos();
 </script>
 <script src="gemini.js"></script>
