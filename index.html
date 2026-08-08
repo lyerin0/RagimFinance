@@ -272,7 +272,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-08f';
+const BUILD = '2026-08-08h';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -296,6 +296,12 @@ const S = {
   draws:     DB.get('draws', {}),   // companyId -> [line]
   t0:        Date.now()
 };
+/* 가격을 실제로 움직이는 창은 하나뿐이다.
+   Firebase 를 안 쓰면 내 창, 쓰면 호스트 창.
+   게스트가 뉴스를 가격에 반영하면 그 효과는 방송에 덮여 사라지고,
+   화면에만 잠깐 나타났다 없어져서 '악재인데 주가가 오른다'가 된다. */
+const isEngine = () => !(window.FB && FB.on) || !FB.guest;
+
 const persist = () => {
   DB.set('me',S.me); DB.set('positions',S.positions);
   DB.set('draws',S.draws); DB.set('fx',S.fx);
@@ -314,13 +320,17 @@ const persist = () => {
 const POP = 100_000;
 
 // 성향별 파라미터: 뉴스민감도 / 모멘텀추종 / 밸류 / 인내(청산 지연) / 회전율
+/* short: 공매도 가능 여부.
+   이게 없으면 아무도 주식을 안 들고 있는 신규 상장사에서
+   악재가 떠도 팔 사람이 없어 매도 압력이 아예 안 생긴다.
+   그러면 -90 짜리 기사에도 주가가 올라가는 한쪽만 열린 시장이 된다. */
 const ARCH = [
-  {key:'장기투자', share:.34, news:.35, mom:.10, val:.85, patience:.95, turn:.04, decay:.985},
-  {key:'단기투자', share:.26, news:.75, mom:.55, val:.25, patience:.55, turn:.28, decay:.93 },
-  {key:'데이트레이더', share:.16, news:.90, mom:.95, val:.05, patience:.15, turn:.75, decay:.85 },
-  {key:'기관',    share:.08, news:.55, mom:.30, val:.90, patience:.90, turn:.10, decay:.97 },
-  {key:'개미추종', share:.11, news:.85, mom:.80, val:.05, patience:.35, turn:.45, decay:.90 },
-  {key:'역발상',  share:.05, news:-.60,mom:-.70,val:.75, patience:.80, turn:.20, decay:.95 }
+  {key:'장기투자', share:.34, news:.35, mom:.10, val:.85, patience:.95, turn:.04, decay:.985, short:false},
+  {key:'단기투자', share:.26, news:.75, mom:.55, val:.25, patience:.55, turn:.28, decay:.93 , short:true },
+  {key:'데이트레이더', share:.16, news:.90, mom:.95, val:.05, patience:.15, turn:.75, decay:.85 , short:true },
+  {key:'기관',    share:.08, news:.55, mom:.30, val:.90, patience:.90, turn:.10, decay:.97 , short:true },
+  {key:'개미추종', share:.11, news:.85, mom:.80, val:.05, patience:.35, turn:.45, decay:.90 , short:false},
+  {key:'역발상',  share:.05, news:-.60,mom:-.70,val:.75, patience:.80, turn:.20, decay:.95 , short:true }
 ];
 
 const Sim = {
@@ -364,9 +374,13 @@ const Sim = {
       const lot = Math.max(1, Math.round(this.risk[i]*a.turn*90));
       if(sig > 0.42 && this.cash[i] > co.price*lot){
         h[i]+=lot; this.cash[i]-=co.price*lot; buy+=lot;
-      } else if(sig < -0.42*a.patience && h[i]>0){
-        const q = Math.min(h[i], lot);
-        h[i]-=q; this.cash[i]+=co.price*q; sell+=q;
+      } else if(sig < -0.42*a.patience){
+        // 공매도 가능한 성향은 보유량이 0이어도 판다 (음수 포지션)
+        const floor = a.short ? -this.risk[i]*260 : 0;
+        if(h[i] > floor){
+          const q = Math.min(h[i]-floor, lot);
+          h[i]-=q; this.cash[i]+=co.price*q; sell+=q;
+        }
       }
     }
     return {buy, sell, net:buy-sell, vol:buy+sell};
@@ -902,6 +916,9 @@ function post({cid,src,by,title,body,impact,horizon,confidence,volatility}){
 window.pushNews = post;
 
 function fire(n){
+  if(!isEngine()) return;              // 게스트는 시세를 만들지 않는다
+  if(n.fired) return;                  // 같은 뉴스를 두 번 반영하지 않는다
+  n.fired = true;
   const co=S.companies.find(c=>c.id===n.cid);
   if(co) applyNews(co,{impact:n.impact,horizon:n.horizon,
                        confidence:n.confidence,volatility:n.volatility});
@@ -966,6 +983,7 @@ document.getElementById('pop').textContent=POP.toLocaleString();
 /* Gemini 가 쿼터·오류로 응답하지 못하면 판정중 상태가 영원히 남는다.
    2분이 지나면 로컬 채점으로 확정해서 뉴스가 갇히지 않게 한다. */
 setInterval(()=>{
+  if(!isEngine()) return;              // 여러 창이 각자 채점하면 값이 엇갈린다
   const now=Date.now(); let hit=false;
   S.news.forEach(n=>{
     if(n.pending && now - n.ts > 120000){
