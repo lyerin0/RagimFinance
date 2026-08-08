@@ -4,6 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SOSIKTONG — 가상 거래소</title>
+<script>
+/* ── Firebase 웹 설정 ───────────────────────────────────────
+   콘솔에서 복사한 firebaseConfig 객체를 여기 붙여넣으세요.
+   이 값들은 비밀이 아닙니다 — 공개 저장소에 올려도 됩니다.
+   보안은 Firestore 규칙이 담당합니다. null 이면 로컬 모드로 돕니다. */
+window.FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCEkX_JykVURhNioNpGdwZRBCqH74UE8P8",
+  authDomain: "ragimfinance.firebaseapp.com",
+  projectId: "ragimfinance",
+  storageBucket: "ragimfinance.firebasestorage.app",
+  messagingSenderId: "917239742631",
+  appId: "1:917239742631:web:ccdb52636ee7e3390d9b82"
+};
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@300;400;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -171,6 +185,7 @@ body{
       <div>USD/KRW <b id="fx">1,380.0</b></div>
       <div>투자자 <b id="pop">100,000</b></div>
       <div>세션 <b id="clock">00:00</b></div>
+      <div>세계 <b id="hostDot">로컬</b></div>
       <button class="tool" id="gemBtn">Gemini <span id="gemDot">○</span></button>
       <button class="tool" id="adminBtn">관리자</button>
     </div>
@@ -234,8 +249,6 @@ body{
 /* ═══════════════════════════════════════════════════════
    0. 저장 계층 — Firebase 설정이 있으면 Firestore, 없으면 로컬
    ═══════════════════════════════════════════════════════ */
-const FIREBASE_CONFIG = null; // ← firebase-init.js 참고해서 채우면 자동 전환
-
 const DB = {
   key: 'sosiktong.v1',
   cache: null,
@@ -667,6 +680,7 @@ document.getElementById('newCo').onclick=()=>{
       shares:+modal.querySelector('#f_shares').value
     });
     S.companies.push(co); persist(); renderCos(); select(co.id);
+    if(window.FB&&FB.on) FB.addCompany(co);
     toast(`${name} 상장 완료`);
   },'상장하기');
 };
@@ -702,7 +716,9 @@ document.getElementById('adminBtn').onclick=()=>{
     const cid=modal.querySelector('#a_co').value, to=modal.querySelector('#a_to').value.trim();
     if(to && cid){
       const co=S.companies.find(c=>c.id===cid);
-      if(co){ co.owner='u_'+to; co.ownerName=to; toast(`${co.name} 소유권 → ${to}`); }
+      if(co){ co.owner='u_'+to; co.ownerName=to;
+        if(window.FB&&FB.on) FB.setOwner(co.id, co.owner, to);
+        toast(`${co.name} 소유권 → ${to}`); }
     }
     persist(); renderCos();
   },'저장');
@@ -722,6 +738,7 @@ function post({cid,src,by,title,body,impact,horizon,confidence,volatility}){
   S.news.unshift(n);
   if(S.news.length>200) S.news.pop();
   if(!wait) fire(n);
+  if(window.FB&&FB.on) FB.addNews(n);
   persist(); renderNews();
 }
 window.pushNews = post;
@@ -742,6 +759,8 @@ window.applyScore = function(id, v){
   n.volatility = v.volatility ?? 1;
   n.pending    = false; n.fresh = true;
   fire(n); persist(); renderNews();
+  if(window.FB&&FB.on) FB.patchNews(id, {impact:n.impact, horizon:n.horizon,
+    confidence:n.confidence, volatility:n.volatility, pending:false});
 };
 
 /* Gemini 없을 때 쓰는 임시 감성 점수 (워커 붙이면 대체됨) */
@@ -785,7 +804,7 @@ document.getElementById('pop').textContent=POP.toLocaleString();
 
 let saveT=0;
 setInterval(()=>{
-  S.companies.forEach(tick);
+  if(!window.FB || !FB.on || !FB.guest) S.companies.forEach(tick);
   S.fx += (Math.random()-0.5)*0.9;
   document.getElementById('fx').textContent=S.fx.toFixed(1);
   const s=((Date.now()-S.t0)/1000)|0;
@@ -797,16 +816,17 @@ setInterval(()=>{
 }, TICK_MS);
 
 /* 초기 부팅 */
-if(!S.companies.length){
+if(!window.FIREBASE_CONFIG && !S.companies.length){
   ['라김전자','한빛중공업','서진바이오'].forEach((n,i)=>{
     S.companies.push(makeCompany({name:n, ticker:['RGE','HBH','SJB'][i],
       desc:'샘플 상장사', price:[68000,42000,115000][i], shares:[2_000_000,1_400_000,600_000][i]}));
   });
   persist();
 }
-fit(); select(S.companies[0].id); renderWallet(); renderPos();
+fit(); if(S.companies.length) select(S.companies[0].id); renderWallet(); renderPos();
 </script>
 <script src="gemini.js"></script>
+<script type="module" src="firebase.js"></script>
 <script>renderGemBadge();</script>
 </body>
 </html>
