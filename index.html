@@ -440,6 +440,43 @@ function applyNews(co, {impact, horizon='mid', confidence=.7, volatility=1}){
 }
 
 const TICK_MS = 500, BARS_PER_CANDLE = 16;
+const CANDLE_MS = TICK_MS * BARS_PER_CANDLE;   // 캔들 하나 = 8초
+
+/* 아무도 접속하지 않은 동안에도 장이 돌아간 것처럼 만든다.
+   GitHub Pages 에는 서버가 없어서 진짜로 돌릴 방법이 없다.
+   대신 호스트가 돌아올 때 비운 시간만큼 시뮬레이션을 몰아서 돌린다.
+   결과는 저장된 상태에서 이어지므로 가격이 튀거나 초기화되지 않는다. */
+window.catchUp = function(elapsedMs){
+  if(!(elapsedMs > CANDLE_MS) || !S.companies.length) return 0;
+  const want  = Math.floor(elapsedMs / CANDLE_MS);
+  const bars  = Math.min(want, 900);              // 2시간치까지만 따라잡는다
+  const ticks = bars * BARS_PER_CANDLE;
+  for(let i=0;i<ticks;i++){
+    // 무인 구간은 표본을 줄여 가볍게 돈다 — 방향성은 유지된다
+    S.companies.forEach(co => {
+      const flow = Sim.step(co, 600);
+      const push = clamp(flow.net/(co.shares*0.012), -0.035, 0.035);
+      co.price = Math.max(1, co.price*(1+push+(Math.random()-0.5)*0.0035));
+      co.mom   = co.mom*0.9 + push*0.1;
+      ARCH.forEach((a,k)=> co.sent[k]*=a.decay);
+      if(!co.cur) co.cur={o:co.price,h:co.price,l:co.price,c:co.price,v:0};
+      co.cur.c=co.price;
+      co.cur.h=Math.max(co.cur.h,co.price);
+      co.cur.l=Math.min(co.cur.l,co.price);
+      co.cur.v+=flow.vol;
+      if(++co.tick>=BARS_PER_CANDLE){
+        co.candles.push(co.cur);
+        if(co.candles.length>420) co.candles.shift();
+        co.cur=null; co.tick=0;
+      }
+    });
+  }
+  S.companies.forEach(co => { co.prev = (co.candles[co.candles.length-30]||co.candles[0]||{c:co.price}).c; });
+  if(S.sel){ renderHead(); fit(); paint(); }
+  const mins = Math.round(bars*CANDLE_MS/60000);
+  if(mins >= 1) toast(`비운 ${mins}분간의 장세를 반영했습니다`);
+  return bars;
+};
 
 function tick(co){
   const flow = Sim.step(co);
@@ -591,6 +628,8 @@ dv.addEventListener('wheel', e=>{
 /* ═══════════════════════════════════════════════════════
    5. 매매
    ═══════════════════════════════════════════════════════ */
+const syncMe = () => { if(window.FB && FB.on) FB.saveMe(); };
+
 function open(side){
   const co=S.sel; if(!co) return toast('종목을 먼저 고르세요');
   const q=Math.max(1, +document.getElementById('qty').value||0);
@@ -599,14 +638,14 @@ function open(side){
   if(margin>S.me.cash) return toast('증거금이 부족합니다');
   S.me.cash-=margin;
   S.positions.push({id:uid(),cid:co.id,side,qty:q,entry:co.price,lev,margin});
-  persist(); renderPos(); renderWallet();
+  persist(); syncMe(); renderPos(); renderWallet();
   toast(`${side==='long'?'롱':'숏'} ${q}주 · ${won(co.price)}`);
 }
 function close(pid){
   const i=S.positions.findIndex(p=>p.id===pid); if(i<0) return;
   const p=S.positions[i], co=S.companies.find(c=>c.id===p.cid);
   S.me.cash += p.margin + pnlOf(p,co);
-  S.positions.splice(i,1); persist(); renderPos(); renderWallet();
+  S.positions.splice(i,1); persist(); syncMe(); renderPos(); renderWallet();
   toast('청산 완료');
 }
 const pnlOf=(p,co)=> !co?0:(co.price-p.entry)*p.qty*(p.side==='long'?1:-1);
@@ -767,7 +806,9 @@ document.getElementById('newPost').onclick=()=>{
     const t=modal.querySelector('#p_t').value.trim();
     const b=modal.querySelector('#p_b').value.trim();
     if(!t) { toast('제목을 입력하세요'); return false; }
-    post({cid:co.id, src:'CEO', by:S.me.name, title:t, body:b, impact:localScore(t+' '+b)});
+    // impact 를 넘기지 않는다. 비워두면 Gemini 대기열로 들어가고,
+    // 키가 없을 때만 post() 안에서 로컬 채점으로 떨어진다.
+    post({cid:co.id, src:'CEO', by:S.me.name, title:t, body:b});
   },'기고하기');
 };
 
@@ -788,6 +829,10 @@ document.getElementById('adminBtn').onclick=()=>{
   openModal('관리자', `
     <div class="fld"><label>내 표시 이름</label><input id="a_nm" value="${esc(S.me.name)}"></div>
 
+    <p style="font-size:10px;color:${S.me.admin?'var(--ink-dim)':'var(--amber)'}">
+      명단 등록 ${(window.ADMIN_UIDS||[]).includes(myId)?'O':'X'} ·
+      명단 ${(window.ADMIN_UIDS||[]).length}명 ·
+      판정 ${S.me.admin?'관리자':'일반'}</p>
     <p style="font-size:10px;color:var(--ink-dim)">빌드 ${BUILD} ·
       ${linked ? (FB.guest?'시세 수신 중':'이 창이 호스트') : '로컬 모드 (Firebase 미연결)'}</p>
     <div class="fld"><label>내 ID ${S.me.admin?'· 관리자':'· 일반 사용자'}</label>
