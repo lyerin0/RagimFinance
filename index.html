@@ -156,6 +156,12 @@ body{
 .src.ceo{background:rgba(240,169,44,.14);color:var(--amber)}
 .src.gem{background:rgba(181,124,232,.16);color:var(--gem)}
 .src.macro{background:rgba(62,207,207,.12);color:var(--cyan)}
+.src.wire{background:rgba(232,232,232,.10);color:var(--ink)}
+.tier{padding:0 4px;border-radius:2px;font-size:9px;letter-spacing:0}
+.tier.t0{background:rgba(62,207,207,.14);color:var(--cyan)}
+.tier.t1{background:rgba(232,232,232,.10);color:var(--ink-dim)}
+.tier.t2{background:rgba(240,169,44,.14);color:var(--amber)}
+.tier.t3{background:rgba(181,124,232,.18);color:var(--gem)}
 .news h4{font-size:12px;font-weight:600;line-height:1.45;margin-bottom:3px}
 .news p{font-size:11px;color:var(--ink-dim);line-height:1.6}
 .news .imp{float:right;font-size:10px;font-weight:600}
@@ -213,6 +219,10 @@ body{
         <div class="title" id="cName">—</div>
         <div class="last mono" id="cPrice">—</div>
         <div class="mono" id="cChg" style="font-size:12px"></div>
+        <span id="tierTag" class="tier" style="margin-right:4px"></span>
+        <div class="mono" id="limitTag" style="font-size:10px;font-weight:700;
+             letter-spacing:.1em;padding:2px 6px;border:1px solid currentColor;
+             border-radius:3px;display:none"></div>
         <div class="spacer"></div>
         <button class="tool on" data-tool="cursor">커서</button>
         <button class="tool" data-tool="trend">추세선</button>
@@ -246,7 +256,9 @@ body{
     <div id="right">
       <div class="sec-head">내 포지션</div>
       <div id="posList"><div class="empty">보유 포지션 없음</div></div>
-      <div class="sec-head">소식통 <button id="newPost">+ 기고</button></div>
+      <div class="sec-head">소식통
+        <button id="newWire">+ 뉴스</button>
+        <button id="newPost">+ 기고</button></div>
       <div id="newsList"><div class="empty">아직 소식이 없습니다</div></div>
     </div>
   </div>
@@ -273,7 +285,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09b';
+const BUILD = '2026-08-09d';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -455,20 +467,34 @@ function seed(co, n){
     co.candles.push({o,h,l,c:p,v:Math.round(20000+Math.random()*90000)});
   }
   co.price=p; co.prev=co.candles[Math.max(0,n-30)].c; co.fair=p;
+  co.ref=p; co.refAge=0;
 }
 
 /* 뉴스 → 성향별 심리로 주입. Gemini의 impact 벡터가 들어오는 지점. */
 function applyNews(co, {impact, horizon='mid', confidence=.7, volatility=1}){
+  const t = tierOf(co);
+  const reach = t[3];                       // 잡주일수록 뉴스에 크게 반응한다
+
+  /* 재료는 두 갈래로 들어간다.
+       sent = 심리. 곧 식는다. 스파이크를 만들고 되돌린다.
+       fair = 실적. 영구히 남는다. 주가 레벨 자체를 옮긴다.
+     예전에는 sent 1.6 대 fair 0.13 이라 심리가 식으면 남는 게 없었다.
+     그래서 무슨 호재가 나든 결국 제자리로 돌아왔다. 그건 틀렸다.
+     horizon 이 이 배분을 정한다 — 테마성 재료는 스파이크 후 되돌림,
+     설비투자 같은 장기 재료는 계단식으로 레벨이 올라가 안 내려온다. */
+  const mix = horizon==='short' ? {s:1.9, f:0.10}
+            : horizon==='long'  ? {s:0.7, f:0.42}
+            :                     {s:1.3, f:0.26};
+
   ARCH.forEach((a,i)=>{
-    // 장투는 단기 뉴스에 둔감, 데이트레이더는 장기 뉴스에 둔감
     const fit = horizon==='short' ? (1.35 - a.patience)
               : horizon==='long'  ? (0.35 + a.patience)
               : 1;
-    co.sent[i] += impact*confidence*fit*1.6;
+    co.sent[i] += impact*confidence*fit*mix.s*reach;
     co.sent[i] = clamp(co.sent[i], -3.5, 3.5);
   });
-  co.fair *= (1 + impact*confidence*0.13);
-  co.volShock = (co.volShock||1) + (volatility-1)*0.8;
+  co.fair *= (1 + impact*confidence*mix.f*reach);
+  co.volShock = (co.volShock||1) + (volatility-1)*0.8*reach;
 }
 
 const TICK_MS = 500, BARS_PER_CANDLE = 16;
@@ -487,8 +513,9 @@ window.catchUp = function(elapsedMs){
     // 무인 구간은 표본을 줄여 가볍게 돈다 — 방향성은 유지된다
     S.companies.forEach(co => {
       const flow = Sim.step(co, 600);
-      const push = clamp(flow.net/(co.shares*0.02), -MAX_PUSH, MAX_PUSH);
-      co.price = Math.max(1, co.price*(1+push+(Math.random()-0.5)*0.0022));
+      const t2 = tierOf(co);
+      const push = clamp(flow.net/(co.shares*t2[2]), -MAX_PUSH*t2[3], MAX_PUSH*t2[3]);
+      co.price = Math.max(1, co.price*(1+push+(Math.random()-0.5)*0.0022*t2[3]));
       co.mom   = co.mom*0.9 + push*0.1;
       ARCH.forEach((a,k)=> co.sent[k]*=a.decay);
       if(!co.cur) co.cur={o:co.price,h:co.price,l:co.price,c:co.price,v:0};
@@ -510,14 +537,47 @@ window.catchUp = function(elapsedMs){
   return bars;
 };
 
+/* 기업 규모. 시가총액으로 자동 분류한다. 따로 입력받지 않는다 —
+   주가가 오르면 잡주가 소형주가 되고, 폭락하면 반대로 내려간다.
+   등급마다 차트 성격이 달라진다: 대형주는 무겁게, 잡주는 미친 듯이. */
+const TIERS = [
+  // 이름     기준시총   유동성  잡음   뉴스반응
+  ['대형주', 1.0e12,    0.055,  0.6,   0.55],
+  ['중견주', 1.0e11,    0.030,  0.9,   0.85],
+  ['소형주', 1.0e10,    0.016,  1.5,   1.30],
+  ['잡주',   0,         0.008,  2.6,   1.90]
+];
+function tierOf(co){
+  const cap = co.shares * co.price;
+  return TIERS.find(t => cap >= t[1]) || TIERS[TIERS.length-1];
+}
+
+const FEE_RATE   = 0.00015;   // 증권사 수수료 0.015% (진입·청산 양쪽)
+const TAX_RATE   = 0.0018;    // 거래세 0.18% (청산할 때만)
+const MAINT      = 0.15;      // 유지증거금 15%. 밑으로 내려가면 강제 청산
+const LIMIT      = 0.30;      // 상하한가 ±30%
+const DAY_BARS   = 225;       // 기준가를 갱신하는 주기 (캔들 225개 = 실시간 30분)
+
 const MAX_PUSH = 0.012;      // 한 틱 최대 1.2%. 캔들당 16틱이라 이것도 넉넉하다
 
 function tick(co){
+  if(!co.ref){ co.ref=co.price; co.refAge=0; }   // 예전 기업 데이터 보정
+  const t    = tierOf(co);
   const flow = Sim.step(co);
-  const liq  = co.shares*0.02;
-  const push = clamp(flow.net/liq, -MAX_PUSH, MAX_PUSH);
-  const noise= (Math.random()-0.5)*0.0022*(co.volShock||1);
+  const liq  = co.shares*t[2];                        // 대형주는 같은 주문에 덜 움직인다
+  const push = clamp(flow.net/liq, -MAX_PUSH*t[3], MAX_PUSH*t[3]);
+  const noise= (Math.random()-0.5)*0.0022*t[3]*(co.volShock||1);
   co.price   = Math.max(1, co.price*(1+push+noise));
+
+  /* 상하한가. 한국 시장처럼 기준가 대비 ±30% 에서 막는다.
+     폭주 방지책이자, 벽에 닿으면 그 자체로 사건이 된다. */
+  if(co.ref){
+    const hi=co.ref*(1+LIMIT), lo=co.ref*(1-LIMIT);
+    if(co.price>=hi){ co.price=hi; co.limit='up'; }
+    else if(co.price<=lo){ co.price=lo; co.limit='dn'; }
+    else co.limit=null;
+  }
+
   co.mom     = co.mom*0.9 + push*0.1;
   co.volShock= 1 + ((co.volShock||1)-1)*0.995;
 
@@ -534,6 +594,7 @@ function tick(co){
     co.candles.push(co.cur);
     if(co.candles.length>420) co.candles.shift();
     co.cur=null; co.tick=0;
+    if(++co.refAge>=DAY_BARS){ co.ref=co.price; co.refAge=0; }   // 기준가 갱신
   }
 }
 
@@ -664,25 +725,56 @@ dv.addEventListener('wheel', e=>{
    ═══════════════════════════════════════════════════════ */
 const syncMe = () => { if(window.FB && FB.on) FB.saveMe(); };
 
+/* 체결가는 현재가가 아니다. 물량이 클수록 호가를 먹으며 밀린다.
+   이게 없으면 대량 매수로 주가를 올린 뒤 파는 게 무위험 공짜 돈이 된다. */
+function slip(co, qty){ return clamp(qty/(co.shares*tierOf(co)[2]), 0, 0.08); }
+
 function open(side){
   const co=S.sel; if(!co) return toast('종목을 먼저 고르세요');
   const q=Math.max(1, +document.getElementById('qty').value||0);
   const lev=+document.getElementById('lev').value;
-  const margin=co.price*q/lev;
-  if(margin>S.me.cash) return toast('증거금이 부족합니다');
-  S.me.cash-=margin;
-  S.positions.push({id:uid(),cid:co.id,side,qty:q,entry:co.price,lev,margin});
+
+  if(co.limit==='up' && side==='long')  return toast('상한가입니다. 살 물량이 없습니다');
+  if(co.limit==='dn' && side==='short') return toast('하한가입니다. 팔 물량이 없습니다');
+
+  const imp    = slip(co,q);
+  const fill   = co.price*(1 + (side==='long'? imp : -imp));
+  const margin = fill*q/lev;
+  const fee    = fill*q*FEE_RATE;
+  if(margin+fee > S.me.cash) return toast('증거금이 부족합니다');
+  S.me.cash -= margin+fee;
+  S.positions.push({id:uid(),cid:co.id,side,qty:q,entry:fill,lev,margin});
+
+  co.price = Math.max(1, co.price*(1 + (side==='long'? imp : -imp)*0.6));
+  if(imp>0.004) toast(`체결 ${won(fill)} · 물량이 커서 ${(imp*100).toFixed(2)}% 밀렸습니다`);
   persist(); syncMe(); renderPos(); renderWallet();
   toast(`${side==='long'?'롱':'숏'} ${q}주 · ${won(co.price)}`);
 }
 function close(pid){
   const i=S.positions.findIndex(p=>p.id===pid); if(i<0) return;
   const p=S.positions[i], co=S.companies.find(c=>c.id===p.cid);
-  S.me.cash += p.margin + pnlOf(p,co);
+  const imp  = slip(co,p.qty);
+  const fill = co.price*(1 + (p.side==='long'? -imp : imp));   // 청산은 반대 방향으로 밀린다
+  const pnl  = (fill-p.entry)*p.qty*(p.side==='long'?1:-1);
+  const cost = fill*p.qty*(FEE_RATE+TAX_RATE);
+  S.me.cash += Math.max(0, p.margin + pnl - cost);
+  co.price = Math.max(1, co.price*(1 + (p.side==='long'? -imp : imp)*0.6));
   S.positions.splice(i,1); persist(); syncMe(); renderPos(); renderWallet();
   toast('청산 완료');
 }
 const pnlOf=(p,co)=> !co?0:(co.price-p.entry)*p.qty*(p.side==='long'?1:-1);
+
+/* 강제 청산. 레버리지를 쓰는데 청산이 없으면 손실 한도가 없어서
+   레버리지가 사실상 공짜가 된다. 증거금 유지율이 깨지면 잘라낸다. */
+function checkLiq(){
+  S.positions.slice().forEach(p=>{
+    const co=S.companies.find(c=>c.id===p.cid); if(!co) return;
+    if(pnlOf(p,co) <= -p.margin*(1-MAINT)){
+      toast(`강제 청산 — ${co.name} ${p.side==='long'?'롱':'숏'} ×${p.lev}`);
+      close(p.id);
+    }
+  });
+}
 
 /* ═══════════════════════════════════════════════════════
    6. 렌더
@@ -697,7 +789,8 @@ function renderCos(){
     const badge=c.img?`<img src="${c.img}" alt="">`:`<div class="ph">${c.ticker[0]}</div>`;
     return `<div class="co ${S.sel&&S.sel.id===c.id?'on':''}" data-id="${c.id}">
       ${badge}
-      <div class="nm"><b>${c.name}</b><small>${c.ticker} · ${c.country}</small></div>
+      <div class="nm"><b>${c.name}</b><small>${c.ticker} · ${c.country} ·
+        <span class="tier t${TIERS.indexOf(tierOf(c))}">${tierOf(c)[0]}</span></small></div>
       <div class="pr mono ${k}"><b>${Math.round(c.price).toLocaleString()}</b>${d>=0?'+':''}${d.toFixed(2)}%</div>
     </div>`;
   }).join('');
@@ -715,6 +808,15 @@ function renderHead(){
     btn.style.display = (co && (co.owner===myId || S.me.admin)) ? '' : 'none';
   }
   if(!co) return;
+  const tag=document.getElementById('limitTag');
+  tag.style.display = co.limit ? '' : 'none';
+  if(co.limit){
+    tag.textContent = co.limit==='up' ? '상한가' : '하한가';
+    tag.style.color = co.limit==='up' ? 'var(--rise)' : 'var(--fall)';
+  }
+  const tr=tierOf(co);
+  const tt=document.getElementById('tierTag');
+  if(tt){ tt.textContent=tr[0]; tt.className='tier t'+TIERS.indexOf(tr); }
   const d=(co.price-co.prev)/co.prev*100;
   document.getElementById('cName').textContent=`${co.name} (${co.ticker})`;
   document.getElementById('cPrice').textContent=Math.round(co.price).toLocaleString();
@@ -748,7 +850,7 @@ function renderNews(){
   const list=S.news.filter(n=>!S.sel||n.cid===S.sel.id||n.cid==='*').slice(0,40);
   if(!list.length){ el.innerHTML='<div class="empty">아직 소식이 없습니다</div>'; return; }
   el.innerHTML=list.map(n=>{
-    const cls=n.src==='젬민이'?'gem':n.src==='매크로'?'macro':'ceo';
+    const cls=n.src==='젬민이'?'gem':n.src==='매크로'?'macro':n.src==='뉴스'?'wire':'ceo';
     const im=n.impact??0;
     const score = n.pending
       ? `<span class="imp mono" style="color:var(--gem)">판정중…</span>`
@@ -921,6 +1023,29 @@ function delistCompany(cid){
   toast(`${name} 상장폐지 완료`);
 }
 
+const WIRE_COOL = 5*60*1000;      // 같은 사람이 5분에 한 번만
+
+document.getElementById('newWire').onclick=()=>{
+  const left = WIRE_COOL - (Date.now() - (S.me.lastWire||0));
+  if(left > 0) return toast(`${Math.ceil(left/60000)}분 뒤에 다시 쓸 수 있습니다`);
+
+  openModal('뉴스 작성', `
+    <div class="fld"><label>제목</label><input id="w_t" placeholder="예: 기준금리 0.25%p 인상"></div>
+    <div class="fld"><label>내용</label><textarea id="w_b" placeholder="시장 전체에 영향을 주는 소식"></textarea></div>
+    <p style="font-size:11px;color:var(--ink-dim);line-height:1.7">
+      특정 기업이 아니라 <b>상장된 모든 종목</b>에 영향을 줍니다.
+      대신 개별 기업 기사보다 반영 강도는 약합니다.
+      작성자 이름이 함께 남고, 젬민이의 검증 대상이 됩니다.
+      5분에 한 번만 쓸 수 있습니다.</p>`,
+  ()=>{
+    const t=modal.querySelector('#w_t').value.trim();
+    const b=modal.querySelector('#w_b').value.trim();
+    if(!t){ toast('제목을 입력하세요'); return false; }
+    S.me.lastWire = Date.now();
+    post({cid:'*', src:'뉴스', by:S.me.name, title:t, body:b});
+  },'내보내기');
+};
+
 document.getElementById('newPost').onclick=()=>{
   const co=S.sel; if(!co) return toast('기업을 먼저 고르세요');
   if(co.owner!==S.me.id) return toast('이 기업의 CEO만 기고할 수 있습니다');
@@ -1048,9 +1173,18 @@ function fire(n){
   if(!isEngine()) return;              // 게스트는 시세를 만들지 않는다
   if(n.fired) return;                  // 같은 뉴스를 두 번 반영하지 않는다
   n.fired = true;
+  const v={impact:n.impact,horizon:n.horizon,
+           confidence:n.confidence,volatility:n.volatility};
+
+  if(n.cid==='*'){
+    /* 시장 전체 뉴스. 개별 기업 뉴스보다 약하게 먹인다 —
+       한 사람이 전 종목을 동시에 흔들 수 있는 글이라,
+       같은 세기로 주면 이게 유일한 무기가 된다. */
+    S.companies.forEach(co => applyNews(co, {...v, confidence:(v.confidence??.7)*0.45}));
+    return;
+  }
   const co=S.companies.find(c=>c.id===n.cid);
-  if(co) applyNews(co,{impact:n.impact,horizon:n.horizon,
-                       confidence:n.confidence,volatility:n.volatility});
+  if(co) applyNews(co, v);
 }
 
 /* Gemini 판정이 도착하면 여기로 들어온다 */
@@ -1131,6 +1265,7 @@ setInterval(()=>{
   const s=((Date.now()-S.t0)/1000)|0;
   document.getElementById('clock').textContent=`${String((s/60|0)%60).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
   if(S.sel){ renderHead(); paint(); }
+  checkLiq();
   renderCos(); renderWallet(); renderPos();
   if(++saveT%4===0) renderGemBadge();
   if(saveT%20===0) persist();
