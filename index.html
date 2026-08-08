@@ -200,6 +200,8 @@ body{
       <div>USD/KRW <b id="fx">1,380.0</b></div>
       <div>투자자 <b id="pop">100,000</b></div>
       <div>세션 <b id="clock">00:00</b></div>
+      <div id="mkTag" style="display:flex;gap:5px;align-items:center">
+        <b id="mkDot">●</b><b id="mkTxt">장중</b></div>
       <div>세계 <b id="hostDot">로컬</b></div>
       <button class="tool" id="gemBtn">Gemini <span id="gemDot">○</span></button>
       <button class="tool" id="adminBtn">관리자</button>
@@ -285,7 +287,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09d';
+const BUILD = '2026-08-09e';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -506,8 +508,11 @@ const CANDLE_MS = TICK_MS * BARS_PER_CANDLE;   // 캔들 하나 = 8초
    결과는 저장된 상태에서 이어지므로 가격이 튀거나 초기화되지 않는다. */
 window.catchUp = function(elapsedMs){
   if(!(elapsedMs > CANDLE_MS) || !S.companies.length) return 0;
+  if(!MK.open()) return 0;                        // 마감 중에는 따라잡지 않는다
   const want  = Math.floor(elapsedMs / CANDLE_MS);
-  const bars  = Math.min(want, 900);              // 2시간치까지만 따라잡는다
+  // 자리를 비운 사이 마감 구간이 끼어 있으면 그만큼은 장세가 없었다
+  const openMs = Math.min(elapsedMs, (CLOSE_H-OPEN_H)*3600*1000);
+  const bars  = Math.min(Math.floor(openMs / CANDLE_MS), want, 900);
   const ticks = bars * BARS_PER_CANDLE;
   for(let i=0;i<ticks;i++){
     // 무인 구간은 표본을 줄여 가볍게 돈다 — 방향성은 유지된다
@@ -552,6 +557,77 @@ function tierOf(co){
   return TIERS.find(t => cap >= t[1]) || TIERS[TIERS.length-1];
 }
 
+/* ── 장 운영 시간 ───────────────────────────────────────
+   09:00 개장, 21:00 마감. 브라우저 현지 시각을 쓴다.
+   관리자 비상 조작은 '다음 정규 시각까지만' 유효하다 —
+   그래서 켜둔 걸 잊어도 스케줄이 영영 어긋나지 않는다. */
+const OPEN_H = 9, CLOSE_H = 21;
+
+const MK = {
+  ov: null,                          // {mode:'open'|'close', until:ts}
+
+  sched(d = new Date()){ const h = d.getHours(); return h >= OPEN_H && h < CLOSE_H; },
+
+  /* 지금 기준으로 다음 개장/마감 시각 */
+  nextEdge(now = new Date()){
+    const e = new Date(now); e.setMinutes(0,0,0);
+    const h = now.getHours();
+    if(h < OPEN_H)       e.setHours(OPEN_H);
+    else if(h < CLOSE_H) e.setHours(CLOSE_H);
+    else { e.setDate(e.getDate()+1); e.setHours(OPEN_H); }
+    return e.getTime();
+  },
+
+  open(){
+    if(this.ov && Date.now() < this.ov.until) return this.ov.mode === 'open';
+    if(this.ov) this.ov = null;                 // 만료 — 정규 스케줄로 복귀
+    return this.sched();
+  },
+
+  forced(){ return !!(this.ov && Date.now() < this.ov.until); },
+
+  /* 관리자 비상 조작. 다음 정규 시각에 자동 해제된다. */
+  force(mode){
+    this.ov = mode ? { mode, until: this.nextEdge() } : null;
+    if(window.FB && FB.on) FB.setMarket(this.ov);
+    this.sync(true);
+  },
+
+  /* 개장/마감 전환 감지. 개장 순간 밀린 뉴스를 시가에 터뜨린다. */
+  was: null,
+  sync(quiet){
+    const now = this.open();
+    if(now === this.was) return;
+    const first = this.was === null;
+    this.was = now;
+    renderMarket();
+    if(first) return;
+    if(now){ gapOpen(); if(!quiet) toast('장이 열렸습니다'); }
+    else if(!quiet) toast('장이 마감되었습니다');
+  }
+};
+
+/* 개장 갭. 마감 중 쌓인 뉴스를 한꺼번에 반영하고
+   시가를 그만큼 점프시킨다. 밤새 나온 소식이 아침에 터지는 것. */
+function gapOpen(){
+  if(!isEngine()) return;
+  const held = S.news.filter(n => n.held && !n.pending);
+  if(!held.length) return;
+
+  S.companies.forEach(co => {
+    const mine = held.filter(n => n.cid === co.id || n.cid === '*');
+    if(!mine.length) return;
+    const sum = mine.reduce((a,n) =>
+      a + (n.impact||0)*(n.confidence??.7)*(n.cid==='*'?0.45:1), 0);
+    const jump = clamp(sum*0.09*tierOf(co)[3], -LIMIT*0.8, LIMIT*0.8);
+    co.price = Math.max(1, co.price*(1+jump));
+    if(co.cur) co.cur = null;                  // 갭은 새 캔들에서 시작한다
+  });
+
+  held.forEach(n => { n.held = false; fire(n); });
+  toast(`밤사이 소식 ${held.length}건이 시가에 반영되었습니다`);
+}
+
 const FEE_RATE   = 0.00015;   // 증권사 수수료 0.015% (진입·청산 양쪽)
 const TAX_RATE   = 0.0018;    // 거래세 0.18% (청산할 때만)
 const MAINT      = 0.15;      // 유지증거금 15%. 밑으로 내려가면 강제 청산
@@ -561,6 +637,7 @@ const DAY_BARS   = 225;       // 기준가를 갱신하는 주기 (캔들 225개
 const MAX_PUSH = 0.012;      // 한 틱 최대 1.2%. 캔들당 16틱이라 이것도 넉넉하다
 
 function tick(co){
+  if(!MK.open()) return;                          // 마감 중에는 시세가 움직이지 않는다
   if(!co.ref){ co.ref=co.price; co.refAge=0; }   // 예전 기업 데이터 보정
   const t    = tierOf(co);
   const flow = Sim.step(co);
@@ -734,6 +811,7 @@ function open(side){
   const q=Math.max(1, +document.getElementById('qty').value||0);
   const lev=+document.getElementById('lev').value;
 
+  if(!MK.open()) return toast('장이 마감되었습니다');
   if(co.limit==='up' && side==='long')  return toast('상한가입니다. 살 물량이 없습니다');
   if(co.limit==='dn' && side==='short') return toast('하한가입니다. 팔 물량이 없습니다');
 
@@ -767,6 +845,7 @@ const pnlOf=(p,co)=> !co?0:(co.price-p.entry)*p.qty*(p.side==='long'?1:-1);
 /* 강제 청산. 레버리지를 쓰는데 청산이 없으면 손실 한도가 없어서
    레버리지가 사실상 공짜가 된다. 증거금 유지율이 깨지면 잘라낸다. */
 function checkLiq(){
+  if(!MK.open()) return;               // 시세가 멈춰 있으니 청산도 멈춘다
   S.positions.slice().forEach(p=>{
     const co=S.companies.find(c=>c.id===p.cid); if(!co) return;
     if(pnlOf(p,co) <= -p.margin*(1-MAINT)){
@@ -800,6 +879,16 @@ function select(id){
   S.sel=S.companies.find(c=>c.id===id);
   VIEW={n:110,off:0}; renderCos(); renderHead(); renderNews(); fit(); paint();
 }
+function renderMarket(){
+  const on = MK.open(), dot=document.getElementById('mkDot'), txt=document.getElementById('mkTxt');
+  if(!dot) return;
+  dot.style.color = on ? 'var(--rise)' : 'var(--ink-dim)';
+  const edge = new Date(MK.nextEdge());
+  const hh = String(edge.getHours()).padStart(2,'0');
+  txt.textContent = (on?'장중':'마감') + (MK.forced()?' (비상)':'') + ` · ${hh}시까지`;
+  txt.style.color = MK.forced() ? 'var(--amber)' : '';
+}
+
 function renderHead(){
   const co=S.sel;
   const btn=document.getElementById('editCo');
@@ -1099,6 +1188,18 @@ document.getElementById('adminBtn').onclick=()=>{
 
     <hr style="border:none;border-top:1px solid var(--rule)">
 
+    <div class="fld"><label>장 운영 — ${OPEN_H}시 개장 · ${CLOSE_H}시 마감</label>
+      <div style="display:flex;gap:6px">
+        <button class="btn ghost" id="m_op" style="flex:1">비상 개장</button>
+        <button class="btn ghost" id="m_cl" style="flex:1">비상 마감</button>
+        <button class="btn ghost" id="m_rs" style="flex:1">해제</button></div>
+      <div style="font-size:10px;color:var(--ink-dim);margin-top:4px;line-height:1.6">
+        현재 <b>${MK.open()?'장중':'마감'}</b>${MK.forced()?' (비상 조작 중)':''} ·
+        ${new Date(MK.nextEdge()).getHours()}시에 자동 전환.
+        비상 조작은 다음 정규 시각까지만 유지되며 스케줄은 그대로 돌아갑니다.</div></div>
+
+    <hr style="border:none;border-top:1px solid var(--rule)">
+
     <div class="fld"><label>지갑</label>
       <div style="display:flex;gap:6px;align-items:center">
         <span class="mono" style="flex:1;color:var(--ink-dim)">${won(S.me.cash)}</span>
@@ -1138,6 +1239,17 @@ document.getElementById('adminBtn').onclick=()=>{
     persist(); renderCos();
   },'저장');
 
+  const mk = (mode) => e => {
+    e.preventDefault();
+    if(!S.me.admin) return toast('관리자만 조작할 수 있습니다');
+    MK.force(mode);
+    toast(mode ? (mode==='open'?'비상 개장했습니다':'비상 마감했습니다') : '정규 스케줄로 복귀했습니다');
+    shut();
+  };
+  modal.querySelector('#m_op').onclick = mk('open');
+  modal.querySelector('#m_cl').onclick = mk('close');
+  modal.querySelector('#m_rs').onclick = mk(null);
+
   modal.querySelector('#a_rst').onclick = e => {
     e.preventDefault();
     S.me.cash = 10_000_000; S.positions = [];
@@ -1172,6 +1284,7 @@ window.pushNews = post;
 function fire(n){
   if(!isEngine()) return;              // 게스트는 시세를 만들지 않는다
   if(n.fired) return;                  // 같은 뉴스를 두 번 반영하지 않는다
+  if(!MK.open()){ n.held = true; return; }   // 마감 중 — 개장 시가에 한꺼번에 터진다
   n.fired = true;
   const v={impact:n.impact,horizon:n.horizon,
            confidence:n.confidence,volatility:n.volatility};
@@ -1265,6 +1378,7 @@ setInterval(()=>{
   const s=((Date.now()-S.t0)/1000)|0;
   document.getElementById('clock').textContent=`${String((s/60|0)%60).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
   if(S.sel){ renderHead(); paint(); }
+  MK.sync();
   checkLiq();
   renderCos(); renderWallet(); renderPos();
   if(++saveT%4===0) renderGemBadge();
