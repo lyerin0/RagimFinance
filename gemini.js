@@ -3,24 +3,25 @@
    ───────────────────────────────────────────────────────────────
    설계 원칙 세 가지:
    1. 키는 코드에 없다. 브라우저 localStorage에만 있다.
-   2. 전역 스케줄러가 15초에 최대 1콜. 무료 티어 RPM을 절대 안 넘는다.
+   2. 전역 스케줄러가 1분 30초에 최대 1콜. 무료 티어 RPM을 절대 안 넘는다.
+      채점과 젬민이 감사는 한 콜에 묶여 있다 — 따로 부르면 기사당 2콜이 나간다.
    3. Gemini는 숫자만 뱉는다. 10만 명 시뮬레이션은 로컬이 한다.
    ═══════════════════════════════════════════════════════════════ */
 
 /* 무료 티어 실측 한도: 분당 10콜, 하루 250콜.
    예전 설정(15초에 1콜)은 시간당 240콜이라 한 시간이면 하루치가 증발한다.
    아래 값은 하루 종일 켜둬도 250콜 안에서 끝나도록 잡았다. */
-const MIN_GAP   = 60000;        // 콜 사이 최소 간격 1분
-const AUDIT_GAP = 30*60*1000;   // 젬민이 감사 30분
-const MACRO_GAP = 3*60*60*1000; // 국가 소식·환율 3시간
+const MIN_GAP   = 90000;        // 콜 사이 최소 간격 1분 30초
+const MACRO_GAP = 6*60*60*1000; // 국가 소식·환율 6시간 (검색 붙은 콜이라 제일 비싸다)
 const DAY_CAP   = 200;          // 하루 상한 (250 중 여유를 남긴다)
+const BATCH     = 10;           // 한 콜에 묶어 처리할 기사 수
 
 const Gem = {
   cfg: {},
   calls: 0,
   lastCall: 0,
   backoff: 0,
-  jobs: { macroAt: 0, auditAt: 0 },
+  jobs: { macroAt: 0 },
   dead: false,
 
   /* 하루 사용량을 날짜와 함께 기록해 상한을 넘지 않게 한다 */
@@ -111,7 +112,7 @@ const Gem = {
   /* ── 1) 뉴스 임팩트 판정 (배치) ───────────────────────
      점수 안 매겨진 뉴스를 최대 8건 모아 한 콜로 처리한다. */
   async scoreBatch(){
-    const pend = S.news.filter(n => n.pending).slice(0, 8);
+    const pend = S.news.filter(n => n.pending).slice(0, BATCH);
     if(!pend.length) return false;
 
     const feed = pend.map(n => {
@@ -120,28 +121,73 @@ const Gem = {
         id: n.id,
         co: co ? co.name : '?',
         sector: co ? co.desc.slice(0,40) : '',
-        txt: (n.title + ' — ' + n.body).slice(0, 420)
+        by: n.by || '',
+        // CEO 기고와 유저 뉴스만 검증 대상이다. 매크로·젬민이 기사는 제외.
+        chk: (n.src === 'CEO' || n.src === '뉴스') ? 1 : 0,
+        txt: (n.title + ' — ' + n.body).slice(0, 380)
       });
     }).join('\n');
 
+    const macroCtx = S.news.filter(n => n.src === '매크로').slice(0, 5)
+      .map(n => `- ${n.title}`).join('\n') || '- (없음)';
+
+    /* 채점과 젬민이 감사를 한 콜에 합쳤다.
+       따로 부르면 기사 하나에 2콜이 나가고, 감사는 30분 뒤에나 돌아서
+       CEO 가 거짓말한 게 한참 뒤에 들통났다. 이제 즉시 반응한다. */
     const prompt =
-`너는 냉정한 시장 애널리스트다. 아래 기업 발표들을 읽고 JSON 배열만 출력한다.
-각 원소: {"id":"입력id","impact":-1~1,"horizon":"short|mid|long","confidence":0~1,"volatility":0.5~3}
+`너는 시장 애널리스트이자 '젬민이'라는 이름의 탐사 기자다.
+아래 발표들을 채점하고, 명백히 과장된 것만 골라 반박 기사를 쓴다.
+JSON 객체 하나만 출력한다. 설명·마크다운 금지.
+
+{"scores":[{"id":"입력id","impact":-1~1,"horizon":"short|mid|long","confidence":0~1,"volatility":0.5~3}],
+ "rebuttals":[{"id":"반박할 발표의 id","title":"기사 제목","body":"본문 2~3문장","impact":-1~-0.15,"horizon":"short|mid|long"}]}
 
 채점 원칙:
 - impact 는 발표 주체의 자화자찬을 할인한 값이다.
 - 구체적 수치·계약 상대·일정이 없는 형용사뿐인 발표는 |impact| 0.2 이하로 본다.
 - 이미 시장이 알 법한 뻔한 내용은 0에 가깝게 준다.
-- horizon 은 이 재료가 며칠짜리인지다. 신제품 출시는 short, 설비투자는 long.
-- volatility 는 이 발표가 만들 변동성 배수다. 논란거리일수록 높다.
+- horizon 은 재료의 수명이다. 신제품 출시는 short, 설비투자는 long.
+
+반박 원칙 — 너는 조회수로 먹고사는 기자다. 웬만하면 쓴다:
+- chk 가 1 인 항목은 전부 반박을 시도한다. 각을 못 잡겠으면 그때만 건너뛴다.
+- 명백한 모순이 없어도 좋다. 근거가 얇다, 일정이 없다, 경쟁사는 이미 한다,
+  국가 소식과 온도차가 있다 — 이 정도로도 기사는 나간다.
+- 제목은 자극적으로 뽑는다. 물음표와 단정을 섞어라.
+  예: "OO의 장밋빛 전망, 근거는 어디 있나"
+- 다만 impact 는 정직하게 매긴다. 이게 균형추다:
+    억지로 각 잡은 트집       → -0.15 ~ -0.25
+    근거가 실제로 얇음        → -0.30 ~ -0.50
+    국가 소식과 명백히 모순   → -0.60 ~ -0.90
+  트집 기사는 시장이 거의 안 움직인다. 진짜를 물었을 때만 주가가 무너진다.
+- rebuttals 는 최대 3건이다.
+
+[국가 소식]
+${macroCtx}
 
 [발표]
 ${feed}`;
 
-    const arr = await this.json(this.cfg.kInv, prompt, { maxTokens: 600 });
-    (Array.isArray(arr) ? arr : []).forEach(v => window.applyScore(v.id, v));
+    const d = await this.json(this.cfg.kInv, prompt, { maxTokens: 1100 });
+
+    (d.scores || []).forEach(v => window.applyScore(v.id, v));
     // 응답에 빠진 건 로컬 채점으로 메운다
     pend.forEach(n => { if(n.pending) window.applyScore(n.id, { impact: localScore(n.title+' '+n.body) }); });
+
+    (d.rebuttals || []).slice(0,3).forEach(r => {
+      const src = pend.find(n => n.id === r.id);
+      if(!src || !r.title) return;
+      window.pushNews({
+        cid: src.cid, src:'젬민이', by:'탐사보도',
+        title: r.title, body: r.body || '',
+        impact: clamp(r.impact ?? -0.3, -1, -0.15),
+        /* 트집 기사는 확신도를 낮게 줘서 시장이 거의 안 움직이게 한다.
+           기사 수가 늘어도 노이즈만 늘고 주가는 안 흔들린다. */
+        horizon: r.horizon || 'short',
+        confidence: Math.abs(r.impact ?? -0.3) < 0.28 ? 0.45 : 0.9,
+        volatility: 1.6
+      });
+      toast('젬민이가 반박 기사를 올렸습니다');
+    });
     return true;
   },
 
@@ -186,60 +232,9 @@ fx_move 는 현지통화 약세면 음수, 강세면 양수다.`;
     return true;
   },
 
-  /* ── 3) 젬민이 — 허점 감사 ───────────────────────────
-     이게 이 게임의 심장이다. found:false 를 반드시 허용한다.
-     매번 기사를 쓰게 하면 노이즈가 되고 CEO 발표가 무의미해진다. */
-  async audit(){
-    const targets = S.news.filter(n => n.src === 'CEO' && !n.audited && !n.pending).slice(0, 5);
-    if(!targets.length) return false;
-    targets.forEach(n => n.audited = true);
-
-    const macroCtx = S.news.filter(n => n.src === '매크로').slice(0, 6)
-      .map(n => `- ${n.title}`).join('\n') || '- (수집된 국가 소식 없음)';
-
-    const feed = targets.map(n => {
-      const co = S.companies.find(c => c.id === n.cid);
-      return JSON.stringify({
-        cid: n.cid, co: co ? co.name : '?', country: co ? co.country : '',
-        title: n.title, body: n.body.slice(0, 300)
-      });
-    }).join('\n');
-
-    const prompt =
-`너는 '젬민이', 기업 발표의 허점을 파는 탐사 기자다.
-아래 CEO 발표들을 국가 소식·환율과 대조해, 모순되거나 근거 없이 낙관적인 건만 골라낸다.
-
-규칙:
-- 허점이 없으면 정확히 {"found":false} 만 출력한다. 억지로 만들지 않는다.
-- 발표 하나가 명백히 과장됐을 때만 기사를 쓴다. 애매하면 found:false 다.
-- 기사 body 에는 어떤 국가 소식·환율과 충돌하는지 반드시 명시한다. 3~4문장.
-
-찾았으면:
-{"found":true,"cid":"...","title":"기사 제목","body":"본문","impact":-1~-0.15}
-
-[CEO 발표]
-${feed}
-
-[최근 국가 소식]
-${macroCtx}
-[현재 USD/KRW] ${S.fx.toFixed(1)}`;
-
-    const d = await this.json(this.cfg.kAud || this.cfg.kInv, prompt, { maxTokens: 600 });
-    if(d && d.found && d.cid){
-      window.pushNews({
-        cid: d.cid, src:'젬민이', by:'탐사보도',
-        title: d.title, body: d.body,
-        impact: clamp(d.impact ?? -0.4, -1, -0.15),
-        horizon:'mid', confidence:.9, volatility:2.1
-      });
-      toast('젬민이가 기사를 올렸습니다');
-    }
-    return true;
-  },
-
   /* ── 전역 스케줄러 ───────────────────────────────────
-     15초에 최대 1콜. 우선순위: 임팩트 > 감사 > 매크로.
-     이것만으로 시간당 최대 240콜, 실제로는 훨씬 적다. */
+     1분 30초에 최대 1콜. 채점과 젬민이 감사가 한 콜로 합쳐졌으므로
+     남은 일은 채점(감사 포함)과 매크로 둘뿐이다. */
   async pump(){
     if(!this.ready() || this.busy) return;
     if(Date.now() - this.lastCall < MIN_GAP) return;
@@ -251,10 +246,6 @@ ${macroCtx}
     try{
       const now = Date.now();
       let did = await this.scoreBatch();
-      if(!did && now > this.jobs.auditAt){
-        did = await this.audit();
-        if(did) this.jobs.auditAt = now + AUDIT_GAP;
-      }
       if(!did && now > this.jobs.macroAt){
         did = await this.macro();
         if(did) this.jobs.macroAt = now + MACRO_GAP;
@@ -296,7 +287,7 @@ ${macroCtx}
         거기서 한 번 더 넣어야 합니다.</p>
       <div class="fld"><label>투자자 조종 키 (임팩트 판정)</label>
         <input id="g_i" type="password" value="${c.kInv||''}" placeholder="AIza… 또는 AQ.…"></div>
-      <div class="fld"><label>젬민이 키 (허점 발견 · 기사)</label>
+      <div class="fld"><label>매크로 키 (국가 소식 검색 · 비워두면 위 키 사용)</label>
         <input id="g_a" type="password" value="${c.kAud||''}" placeholder="비우면 위 키를 함께 씁니다"></div>
       <div class="fld"><label>모델</label>
         <input id="g_m" value="${c.model}"></div>
