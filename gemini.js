@@ -123,6 +123,9 @@ const Gem = {
         sector: co ? co.desc.slice(0,40) : '',
         by: n.by || '',
         // CEO 기고와 유저 뉴스만 검증 대상이다. 매크로·젬민이 기사는 제외.
+        cid: n.cid,
+        // 대상 기업을 다시 정할 수 있는 기사. CEO 기고는 자기 회사로 고정이다.
+        pick: (n.src === '뉴스' || n.src === '매크로') ? 1 : 0,
         chk: (n.src === 'CEO' || n.src === '뉴스') ? 1 : 0,
         txt: (n.title + ' — ' + n.body).slice(0, 380)
       });
@@ -130,6 +133,11 @@ const Gem = {
 
     const macroCtx = S.news.filter(n => n.src === '매크로').slice(0, 5)
       .map(n => `- ${n.title}`).join('\n') || '- (없음)';
+
+    // 대상 기업을 고르게 하려면 명단을 줘야 한다
+    const roster = S.companies.map(c =>
+      `${c.id} | ${c.name} | ${c.ticker} | ${c.country} | ${(c.desc||'').slice(0,40)}`
+    ).join('\n') || '(상장 종목 없음)';
 
     /* 채점과 젬민이 감사를 한 콜에 합쳤다.
        따로 부르면 기사 하나에 2콜이 나가고, 감사는 30분 뒤에나 돌아서
@@ -139,8 +147,20 @@ const Gem = {
 아래 발표들을 채점하고, 명백히 과장된 것만 골라 반박 기사를 쓴다.
 JSON 객체 하나만 출력한다. 설명·마크다운 금지.
 
-{"scores":[{"id":"입력id","impact":-1~1,"horizon":"short|mid|long","confidence":0~1,"volatility":0.5~3}],
+{"scores":[{"id":"입력id","cid":"대상 종목 id 또는 *","impact":-1~1,"horizon":"short|mid|long","confidence":0~1,"volatility":0.5~3}],
  "rebuttals":[{"id":"반박할 발표의 id","title":"기사 제목","body":"본문 2~3문장","impact":-1~-0.15,"horizon":"short|mid|long"}]}
+
+대상 종목(cid) 고르는 법:
+- pick 이 0 이면 입력의 cid 를 그대로 돌려준다. 바꾸지 않는다.
+- pick 이 1 이면 기사 내용을 읽고 아래 명단에서 해당 기업의 id 를 고른다.
+- 표기가 달라도 같은 회사면 맞춘다. 한국어·영어·약칭·법인격 표기를 모두 무시하고 발음과 의미로 판단한다.
+  예: '라김기업' = 'Ragim Inc.' = '㈜라김' = 'RAGIM', '전복테크' = 'Jeonbok Tech'.
+- 특정 기업 하나의 실적·계약·제품·사건을 다루면 반드시 그 기업 id 다.
+- 전쟁, 금리, 환율, 증시 폭락처럼 시장 전체를 흔드는 내용일 때만 "*" 를 쓴다.
+- 명단에 없는 기업 얘기면 "*" 대신 가장 가까운 기업을 고르되, 정말 아무 관련이 없으면 "none" 을 쓴다.
+
+[상장 종목]  id | 이름 | 티커 | 국가 | 설명
+${roster}
 
 채점 원칙:
 - impact 는 발표 주체의 자화자찬을 할인한 값이다.
