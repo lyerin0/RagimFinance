@@ -25,7 +25,7 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-09e';
+const FB_BUILD = '2026-08-09f';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
@@ -171,6 +171,14 @@ const FB = {
     });
 
     onSnapshot(doc(this.db,'world','tape'), snap => {
+      const t = snap.data();
+      if(t && this.guest){
+        if(t.nd) NOSPI.div = t.nd;
+        if(t.nk){ try{
+          NOSPI.candles = JSON.parse(t.nk).map(b=>({o:b[0],h:b[1],l:b[2],c:b[3],v:0}));
+          NOSPI.prev = NOSPI.prevClose();
+        }catch(e){} }
+      }
       if(!snap.exists() || !this.guest) return;
       const t = snap.data();
       S.fx = t.fx || S.fx;
@@ -268,7 +276,10 @@ const FB = {
     });
     try{
       await setDoc(doc(this.db,'world','tape'),
-        { px, fx:+S.fx.toFixed(2), at:Date.now() });
+        { px, fx:+S.fx.toFixed(2), at:Date.now(),
+          nd:+NOSPI.div.toFixed(4),          // 제수를 같이 실어 지수를 일치시킨다
+          nk:JSON.stringify(NOSPI.candles.slice(-160).map(b=>[
+               +b.o.toFixed(2),+b.h.toFixed(2),+b.l.toFixed(2),+b.c.toFixed(2)])) });
     }catch(e){ console.warn('[FB] tape', e.message); }
   },
 
