@@ -25,14 +25,14 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-09k';
+const FB_BUILD = '2026-08-09r';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
 const LEASE_MS = 15000;   // 호스트 임대 시간
 
 const FB = {
-  on:false, guest:true, uid:null, db:null, want:false,
+  on:false, guest:true, uid:null, db:null, want:false, hydrated:false,
   hostSince:0, tapeAt:0,
 
   async start(){
@@ -131,6 +131,9 @@ const FB = {
           country:d.country, shares:d.shares, owner:d.owner, ownerName:d.ownerName
         });
       });
+      /* 기업이 도착한 뒤에 로컬 이력을 붙인다. 부팅 시점에는 목록이
+         비어 있어서 복원이 헛돌기 때문이다. 캔들이 이미 있으면 건너뛴다. */
+      loadCandles();
       renderCos();
       if(!S.sel && S.companies.length) select(S.companies[0].id);
     });
@@ -171,13 +174,21 @@ const FB = {
     });
 
     onSnapshot(doc(this.db,'world','tape'), snap => {
-      if(!snap.exists() || !this.guest) return;
+      if(!snap.exists()) return;
       const t = snap.data();
 
       /* 호스트가 예전 빌드면 시세는 그쪽 규칙으로 계산된다.
          내 파일을 아무리 새로 올려도 화면은 안 바뀌므로 반드시 알려야 한다. */
       if(t.b && t.b !== BUILD) warnStale(t.b);
       else clearStale();
+
+      /* 호스트도 부팅 직후 한 번은 방송을 받아 캔들을 이어붙인다.
+         호스트는 평소 방송을 무시하는데(자기 계산이 덮이면 안 되므로),
+         그래서 새로고침하면 빈 차트에서 다시 시작하는 문제가 있었다.
+         기업 목록이 아직 안 왔으면 다음 방송에서 다시 시도한다. */
+      const hydrate = !this.hydrated;
+      if(!this.guest && !hydrate) return;
+      if(hydrate && S.companies.length) this.hydrated = true;
 
       // 지수는 제수까지 같이 받아야 모두가 같은 값을 본다
       if(t.nd) NOSPI.div = t.nd;
@@ -277,7 +288,7 @@ const FB = {
     S.companies.forEach(c => {
       px[c.id] = {
         p:+c.price.toFixed(2), prev:+c.prev.toFixed(2), f:+c.fair.toFixed(2),
-        k: JSON.stringify(c.candles.slice(-160).map(b => [
+        k: JSON.stringify(c.candles.slice(-260).map(b => [
              +b.o.toFixed(1), +b.h.toFixed(1), +b.l.toFixed(1), +b.c.toFixed(1), b.v|0
            ]))
       };
@@ -286,7 +297,7 @@ const FB = {
       await setDoc(doc(this.db,'world','tape'),
         { px, fx:+S.fx.toFixed(2), at:Date.now(), b:BUILD,
           nd:+NOSPI.div.toFixed(4),          // 제수를 같이 실어 지수를 일치시킨다
-          nk:JSON.stringify(NOSPI.candles.slice(-160).map(b=>[
+          nk:JSON.stringify(NOSPI.candles.slice(-260).map(b=>[
                +b.o.toFixed(2),+b.h.toFixed(2),+b.l.toFixed(2),+b.c.toFixed(2)])) });
     }catch(e){ console.warn('[FB] tape', e.message); }
   },
