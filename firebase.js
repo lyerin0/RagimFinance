@@ -25,14 +25,14 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-09h';
+const FB_BUILD = '2026-08-09j';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
 const LEASE_MS = 15000;   // 호스트 임대 시간
 
 const FB = {
-  on:false, guest:true, uid:null, db:null,
+  on:false, guest:true, uid:null, db:null, want:false,
   hostSince:0, tapeAt:0,
 
   async start(){
@@ -212,13 +212,16 @@ const FB = {
         const s = await tx.get(ref);
         const now = Date.now();
         const d = s.exists() ? s.data() : null;
-        // 관리자가 우선권을 갖는다. Gemini 호출이 호스트 창에서만
-        // 일어나므로, 일반 친구가 호스트를 잡으면 AI 가 멈춘다.
-        // 그래서 비관리자는 임대가 두 배로 오래 비어 있을 때만 잡는다.
-        const wait = S.me.admin ? LEASE_MS : LEASE_MS * 2;
-        const free = !d || !d.at || (now - d.at) > wait;
-        if(free || d.host === this.uid){
-          tx.set(ref, { host:this.uid, at:now });
+        /* Gemini 호출은 관리자이면서 호스트인 창에서만 일어난다.
+           그래서 일반 친구가 호스트를 쥐고 있으면 AI 가 통째로 멈춘다.
+           예전에는 임대가 만료될 때까지 기다렸는데, 상대가 계속
+           갱신하면 관리자가 영영 호스트가 못 돼서 AI 가 죽어 있었다.
+           이제 관리자는 비관리자 호스트를 즉시 넘겨받는다. */
+        const free  = !d || !d.at || (now - d.at) > LEASE_MS * 2;
+        const seize = S.me.admin && d && d.host !== this.uid && !d.adm;
+        if(free || seize || d.host === this.uid || this.want){
+          this.want = false;
+          tx.set(ref, { host:this.uid, at:now, adm: !!S.me.admin });
           return true;
         }
         return false;
