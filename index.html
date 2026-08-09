@@ -205,6 +205,8 @@ body{
     <div class="tick mono">
       <div>NOSPI <b id="nospi" class="mono">1,000.00</b>
            <b id="nospiD" class="mono" style="font-size:10px"></b></div>
+      <div>NOSDAQ <b id="nosdaq" class="mono">1,000.00</b>
+           <b id="nosdaqD" class="mono" style="font-size:10px"></b></div>
       <div>NONEX <b id="nonex" class="mono">1,000.00</b>
            <b id="nonexD" class="mono" style="font-size:10px"></b></div>
       <div>기준금리 <b id="rate" class="mono">2.50%</b></div>
@@ -298,7 +300,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-10a';
+const BUILD = '2026-08-10b';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -679,13 +681,23 @@ const RATE = {
    신규 상장은 NONEX 에서 시작하고, 기준을 채우면 NOSPI 로 승급한다.
    기준을 못 채우면 강등, 최저선도 못 지키면 상장폐지된다. */
 const BOARDS = {
-  NOSPI: { name:'NOSPI', label:'정규시장', cap: 3.0e11, price: 3000 },
-  NONEX: { name:'NONEX', label:'성장시장', cap: 2.0e10, price:  500 }
+  NOSPI:  { label:'정규시장', mark:'P', cap: 3.0e11, price: 3000 },
+  NOSDAQ: { label:'코스닥',   mark:'D', cap: 8.0e10, price: 1000 },
+  NONEX:  { label:'성장시장', mark:'X', cap: 2.0e10, price:  500 }
 };
+/* 위에서부터 높은 시장. 심사는 이 순서로 훑는다. */
+const LADDER = ['NOSPI','NOSDAQ','NONEX'];
 const DELIST = { cap: 4.0e9, price: 100 };   // 이 밑이면 상장폐지 대상
 const GRACE  = 6;                            // 관리종목 유예 (심사 6회)
 
-const boardOf = co => co.board === 'NOSPI' ? 'NOSPI' : 'NONEX';
+const boardOf = co => BOARDS[co.board] ? co.board : 'NONEX';
+const rankOf  = co => LADDER.indexOf(boardOf(co));   // 0 이 가장 높다
+
+/* 지금 실적으로 갈 수 있는 가장 높은 시장. 못 가면 null. */
+function bestBoard(co){
+  const cap = co.shares*co.price, px = co.price;
+  return LADDER.find(k => cap >= BOARDS[k].cap && px >= BOARDS[k].price) || null;
+}
 
 /* 지수 하나를 만든다. 두 시장이 완전히 같은 규칙으로 돌아가므로
    객체를 복제하지 않고 공장을 쓴다. */
@@ -731,9 +743,10 @@ function makeIndex(code){
   };
 }
 
-const NOSPI = makeIndex('NOSPI');
-const NONEX = makeIndex('NONEX');
-const INDICES = { NOSPI, NONEX };
+const NOSPI  = makeIndex('NOSPI');
+const NOSDAQ = makeIndex('NOSDAQ');
+const NONEX  = makeIndex('NONEX');
+const INDICES = { NOSPI, NOSDAQ, NONEX };
 
 /* 지수를 가상 종목처럼 감싼다. 차트·드로잉 코드를 그대로 쓰기 위한 껍데기다.
    가격은 계산값이므로 getter 로 노출한다. */
@@ -748,7 +761,8 @@ function makeIdxShell(ix){
     get cur(){ return ix.cur; }
   };
 }
-const IDX = { NOSPI: makeIdxShell(NOSPI), NONEX: makeIdxShell(NONEX) };
+const IDX = Object.fromEntries(
+  Object.entries(INDICES).map(([k,ix]) => [k, makeIdxShell(ix)]));
 
 /* ── 장 운영 시간 ───────────────────────────────────────
    09:00 개장, 21:00 마감. 브라우저 현지 시각을 쓴다.
@@ -808,34 +822,35 @@ function review(){
 
   S.companies.slice().forEach(co => {
     const cap = co.shares*co.price, px = co.price;
-    const bd  = boardOf(co);
-    const meet = k => cap >= BOARDS[k].cap && px >= BOARDS[k].price;
 
-    // 1) 상장폐지 최저선
+    // 1) 최저선 미달 — 관리종목 지정 후 유예가 끝나면 상장폐지
     if(cap < DELIST.cap || px < DELIST.price){
       co.warn = (co.warn||0) + 1;
       if(co.warn === 1) notice(co, `${co.name}, 관리종목 지정 — 상장폐지 기준 미달`);
-      if(co.warn >= GRACE){
+      else if(co.warn >= GRACE){
         notice(co, `${co.name}, 상장폐지 확정 — 시가총액·주가 최저 기준 미달`);
         delistCompany(co.id);
       }
       return;
     }
 
-    // 2) 승급 — NONEX 에서 NOSPI 기준을 채우면 이전상장
-    if(bd === 'NONEX' && meet('NOSPI')){
-      moveBoard(co, 'NOSPI');
-      notice(co, `${co.name}, NOSPI 이전상장 — 정규시장 요건 충족`);
+    const now  = boardOf(co);
+    const best = bestBoard(co) || 'NONEX';
+
+    // 2) 승급은 즉시. 두 계단을 한 번에 뛰어오를 수도 있다.
+    if(LADDER.indexOf(best) < LADDER.indexOf(now)){
+      moveBoard(co, best);
+      notice(co, `${co.name}, ${best} 이전상장 — ${BOARDS[best].label} 요건 충족`);
       co.warn = 0; return;
     }
 
-    // 3) 강등 — NOSPI 요건을 잃으면 성장시장으로
-    if(bd === 'NOSPI' && !meet('NOSPI')){
+    // 3) 강등은 유예를 준다. 순간 등락으로 바로 떨어뜨리면 가혹하다.
+    if(LADDER.indexOf(best) > LADDER.indexOf(now)){
       co.warn = (co.warn||0) + 1;
-      if(co.warn === 1) notice(co, `${co.name}, 관리종목 지정 — NOSPI 요건 미달`);
-      if(co.warn >= GRACE){
-        moveBoard(co, 'NONEX');
-        notice(co, `${co.name}, NONEX 강등 — 정규시장 요건 회복 실패`);
+      if(co.warn === 1) notice(co, `${co.name}, 관리종목 지정 — ${now} 요건 미달`);
+      else if(co.warn >= GRACE){
+        moveBoard(co, best);
+        notice(co, `${co.name}, ${best} 강등 — ${now} 요건 회복 실패`);
         co.warn = 0;
       }
       return;
@@ -1156,7 +1171,7 @@ function renderCos(){
     const v=ix.value(), p=ix.prev||1000, d=(v-p)/p*100;
     const on = S.sel && S.sel.index && S.sel.id===code;
     return `<div class="co idx ${on?'on':''}" data-id="${code}">
-      <div class="ph" style="background:var(--cyan);color:#000">${code[2]}</div>
+      <div class="ph" style="background:var(--cyan);color:#000">${BOARDS[code].mark}</div>
       <div class="nm"><b>${code}</b><small>${BOARDS[code].label} · ${ix.members().length}종목</small></div>
       <div class="pr mono ${d>0.02?'up':d<-0.02?'dn':'flat'}">
         <b>${v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</b>${d>=0?'+':''}${d.toFixed(2)}%</div>
@@ -1167,7 +1182,7 @@ function renderCos(){
      순서까지 흔들리므로, 그리기용 사본만 정렬한다. */
   /* 정규시장을 위에, 성장시장을 아래에. 각각 주가 높은 순. */
   const rows = S.companies.slice().sort((a,b)=>
-    (boardOf(a)===boardOf(b)) ? b.price-a.price : (boardOf(a)==='NOSPI' ? -1 : 1));
+    rankOf(a)!==rankOf(b) ? rankOf(a)-rankOf(b) : b.price-a.price);
 
   el.innerHTML = idxRow + rows.map(c=>{
     const d=(c.price-c.prev)/c.prev*100, k=d>0.02?'up':d<-0.02?'dn':'flat';
@@ -1218,7 +1233,8 @@ function renderRate(){
 }
 
 function renderNospi(){
-  [['nospi',NOSPI],['nonex',NONEX]].forEach(([id,ix])=>{
+  Object.entries(INDICES).forEach(([code,ix])=>{
+    const id = code.toLowerCase();
     const el = document.getElementById(id); if(!el) return;
     const v = ix.value(), p = ix.prev || 1000, d = (v-p)/p*100;
     el.textContent = v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -1630,6 +1646,7 @@ document.getElementById('adminBtn').onclick=()=>{
     <div class="fld"><label>상장 기준</label>
       <div style="font-size:10px;color:var(--ink-dim);line-height:1.8">
         <b style="color:var(--ink)">NOSPI 정규시장</b> — 시총 3,000억 이상 · 주가 3,000원 이상<br>
+        <b style="color:var(--ink)">NOSDAQ 코스닥</b> — 시총 800억 이상 · 주가 1,000원 이상<br>
         <b style="color:var(--ink)">NONEX 성장시장</b> — 시총 200억 이상 · 주가 500원 이상<br>
         <b style="color:var(--fall)">상장폐지</b> — 시총 40억 미만 또는 주가 100원 미만<br>
         신규 상장은 NONEX 에서 시작합니다. 세션마다 심사하며,
