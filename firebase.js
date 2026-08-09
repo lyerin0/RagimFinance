@@ -25,7 +25,7 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-09r';
+const FB_BUILD = '2026-08-10a';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
@@ -167,6 +167,11 @@ const FB = {
 
     // 시세 방송 — 게스트만 받아 적는다
     /* 비상 개폐는 모두가 같은 값을 봐야 한다. 관리자만 쓰고 전원이 읽는다. */
+    onSnapshot(doc(this.db,'world','rate'), snap => {
+      const d = snap.data();
+      if(d && typeof d.v === 'number'){ RATE.v = d.v; renderRate(); }
+    });
+
     onSnapshot(doc(this.db,'world','market'), snap => {
       const d = snap.data();
       MK.ov = (d && d.mode && Date.now() < d.until) ? { mode:d.mode, until:d.until } : null;
@@ -324,7 +329,8 @@ const FB = {
   async editCompany(co){
     if(!this.on) return;
     await updateDoc(doc(this.db,'companies',co.id), {
-      name:co.name, ticker:co.ticker, img:co.img, desc:co.desc, country:co.country
+      name:co.name, ticker:co.ticker, img:co.img, desc:co.desc,
+      country:co.country, board:co.board||'NONEX', warn:co.warn||0
     }).catch(e => toast('수정 실패 — 소유주만 고칠 수 있습니다'));
   },
 
@@ -346,6 +352,12 @@ const FB = {
     await setDoc(doc(this.db,'world','market'),
       ov ? { mode:ov.mode, until:ov.until, by:this.uid } : { mode:null, until:0, by:this.uid }
     ).catch(e => toast('장 상태 저장 실패 — 관리자만 가능합니다'));
+  },
+
+  async setRate(v){
+    if(!this.on) return;
+    await setDoc(doc(this.db,'world','rate'), { v, by:this.uid, at:Date.now() })
+      .catch(() => toast('기준금리 저장 실패 — 관리자만 가능합니다'));
   },
 
   async setOwner(cid, owner, ownerName){
