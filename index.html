@@ -290,7 +290,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09j';
+const BUILD = '2026-08-09k';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -986,6 +986,31 @@ function select(id){
   S.sel = id==='NOSPI' ? IDX : S.companies.find(c=>c.id===id);
   VIEW={n:110,off:0}; renderCos(); renderHead(); renderNews(); fit(); paint();
 }
+/* 호스트 빌드 불일치 경고. 시세를 만드는 창이 낡았으면
+   내 화면의 물리 법칙은 내 파일이 아니라 그쪽 파일이 정한다. */
+function warnStale(hostBuild){
+  let el = document.getElementById('staleBar');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'staleBar';
+    el.style.cssText = `position:fixed;left:0;right:0;bottom:0;z-index:98;
+      background:var(--amber);color:#000;font-size:12px;font-weight:700;
+      padding:8px 14px;display:flex;gap:10px;align-items:center;justify-content:center`;
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `호스트 창이 예전 버전(${hostBuild})을 돌리고 있습니다 —
+    시세는 그쪽 규칙으로 계산됩니다. 내 버전 ${BUILD}
+    <button id="staleTake" style="padding:4px 10px;border:1px solid #000;background:#0002;
+      font-weight:700;cursor:pointer">호스트 가져오기</button>`;
+  el.querySelector('#staleTake').onclick = () => {
+    if(window.FB && FB.on){ FB.want = true; toast('다음 갱신에 호스트를 넘겨받습니다'); }
+  };
+}
+function clearStale(){
+  const el = document.getElementById('staleBar');
+  if(el) el.remove();
+}
+
 function renderNospi(){
   const el = document.getElementById('nospi'); if(!el) return;
   const v = NOSPI.value(), p = NOSPI.prev || 1000;
