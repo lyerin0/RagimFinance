@@ -300,7 +300,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-10b';
+const BUILD = '2026-08-10c';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -1781,6 +1781,8 @@ function post({cid,src,by,title,body,impact,horizon,confidence,volatility}){
 window.pushNews = post;
 
 function fire(n){
+  // 예전 빌드가 매크로 기사에 특정 기업을 붙여놓은 경우가 있다. 되돌린다.
+  if(n.src === '매크로' && n.cid !== '*') n.cid = '*';
   if(!isEngine()) return;              // 게스트는 시세를 만들지 않는다
   if(n.fired) return;                  // 같은 뉴스를 두 번 반영하지 않는다
   if(!MK.open()){ n.held = true; return; }   // 마감 중 — 개장 시가에 한꺼번에 터진다
@@ -1810,8 +1812,10 @@ window.applyScore = function(id, v){
   /* 대상 기업 재지정. '+뉴스' 로 쓴 기사는 일단 전 종목(*)으로 들어오지만,
      특정 기업 얘기면 그 기업으로 옮겨야 한다. 전쟁·금리처럼 정말 시장
      전체를 흔드는 내용만 * 로 남는다. */
-  if(v.cid && v.cid !== n.cid && (n.src==='뉴스' || n.src==='매크로')){
-    if(v.cid === '*' || S.companies.some(c=>c.id===v.cid)) n.cid = v.cid;
+  if(v.cid && v.cid !== n.cid && n.src==='뉴스'){
+    const ok = v.cid === '*'
+      || (S.companies.some(c=>c.id===v.cid) && mentioned(n, v.ment));
+    if(ok) n.cid = v.cid;
   }
   n.impact     = clamp(v.impact ?? 0, -1, 1);
   n.horizon    = v.horizon || n.horizon;
@@ -1822,6 +1826,18 @@ window.applyScore = function(id, v){
   if(window.FB&&FB.on) FB.patchNews(id, {impact:n.impact, horizon:n.horizon,
     confidence:n.confidence, volatility:n.volatility, pending:false, cid:n.cid});
 };
+
+/* Gemini 가 고른 기업이 기사에 실제로 등장하는지 확인한다.
+   확인이 없으면 '정부 규제' 같은 기사에까지 아무 기업이나 붙는다.
+   ment 는 기사에 나온 표기 그대로라서, 한국어↔영어가 달라도
+   기사 본문과 대조하면 검증이 된다. */
+function mentioned(n, ment){
+  if(!ment || typeof ment !== 'string') return false;
+  const norm = x => (x||'').toLowerCase().replace(/[㈜()（）.,'"·\-\s]/g,'');
+  const key = norm(ment);
+  if(key.length < 2) return false;
+  return norm(n.title + ' ' + n.body).includes(key);
+}
 
 /* Gemini 가 못 붙었을 때의 대상 기업 추정.
    표기 정규화 후 이름·티커가 본문에 있는지만 본다.
