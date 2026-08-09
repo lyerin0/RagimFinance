@@ -25,7 +25,7 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-09j';
+const FB_BUILD = '2026-08-09k';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
@@ -174,6 +174,11 @@ const FB = {
       if(!snap.exists() || !this.guest) return;
       const t = snap.data();
 
+      /* 호스트가 예전 빌드면 시세는 그쪽 규칙으로 계산된다.
+         내 파일을 아무리 새로 올려도 화면은 안 바뀌므로 반드시 알려야 한다. */
+      if(t.b && t.b !== BUILD) warnStale(t.b);
+      else clearStale();
+
       // 지수는 제수까지 같이 받아야 모두가 같은 값을 본다
       if(t.nd) NOSPI.div = t.nd;
       if(t.nk){ try{
@@ -279,7 +284,7 @@ const FB = {
     });
     try{
       await setDoc(doc(this.db,'world','tape'),
-        { px, fx:+S.fx.toFixed(2), at:Date.now(),
+        { px, fx:+S.fx.toFixed(2), at:Date.now(), b:BUILD,
           nd:+NOSPI.div.toFixed(4),          // 제수를 같이 실어 지수를 일치시킨다
           nk:JSON.stringify(NOSPI.candles.slice(-160).map(b=>[
                +b.o.toFixed(2),+b.h.toFixed(2),+b.l.toFixed(2),+b.c.toFixed(2)])) });
