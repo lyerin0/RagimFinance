@@ -157,6 +157,7 @@ body{
 .src.gem{background:rgba(181,124,232,.16);color:var(--gem)}
 .src.macro{background:rgba(62,207,207,.12);color:var(--cyan)}
 .src.wire{background:rgba(232,232,232,.10);color:var(--ink)}
+.co.idx{border-bottom:1px solid var(--rule);background:rgba(62,207,207,.04)}
 .tier{padding:0 4px;border-radius:2px;font-size:9px;letter-spacing:0}
 .tier.t0{background:rgba(62,207,207,.14);color:var(--cyan)}
 .tier.t1{background:rgba(232,232,232,.10);color:var(--ink-dim)}
@@ -197,6 +198,8 @@ body{
   <div id="topbar">
     <div class="brand">SOSIKTONG <span>가상거래소</span></div>
     <div class="tick mono">
+      <div>NOSPI <b id="nospi" class="mono">1,000.00</b>
+           <b id="nospiD" class="mono" style="font-size:10px"></b></div>
       <div>USD/KRW <b id="fx">1,380.0</b></div>
       <div>투자자 <b id="pop">100,000</b></div>
       <div>세션 <b id="clock">00:00</b></div>
@@ -287,7 +290,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09e';
+const BUILD = '2026-08-09g';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -449,6 +452,7 @@ function shrinkImage(file, size=128){
 }
 
 function makeCompany({name, ticker, desc, img, country, price, shares}){
+  const idxBefore = NOSPI.value();      // 이 기업이 목록에 들어가기 전의 지수
   const p = price||50000;
   const co = {
     id:uid(), name, ticker:(ticker||name.slice(0,3)).toUpperCase(),
@@ -458,6 +462,7 @@ function makeCompany({name, ticker, desc, img, country, price, shares}){
     mom:0, sent:ARCH.map(()=>0), candles:[], cur:null, tick:0
   };
   seed(co, 140);
+  setTimeout(() => NOSPI.rebase(idxBefore), 0);
   return co;
 }
 function seed(co, n){
@@ -484,9 +489,9 @@ function applyNews(co, {impact, horizon='mid', confidence=.7, volatility=1}){
      그래서 무슨 호재가 나든 결국 제자리로 돌아왔다. 그건 틀렸다.
      horizon 이 이 배분을 정한다 — 테마성 재료는 스파이크 후 되돌림,
      설비투자 같은 장기 재료는 계단식으로 레벨이 올라가 안 내려온다. */
-  const mix = horizon==='short' ? {s:1.9, f:0.10}
-            : horizon==='long'  ? {s:0.7, f:0.42}
-            :                     {s:1.3, f:0.26};
+  const mix = horizon==='short' ? {s:1.9, f:0.22}
+            : horizon==='long'  ? {s:0.7, f:0.78}
+            :                     {s:1.3, f:0.50};
 
   ARCH.forEach((a,i)=>{
     const fit = horizon==='short' ? (1.35 - a.patience)
@@ -522,7 +527,7 @@ window.catchUp = function(elapsedMs){
       const push = clamp(flow.net/(co.shares*t2[2]), -MAX_PUSH*t2[3], MAX_PUSH*t2[3]);
       co.price = Math.max(1, co.price*(1+push+(Math.random()-0.5)*0.0022*t2[3]));
       co.mom   = co.mom*0.9 + push*0.1;
-      ARCH.forEach((a,k)=> co.sent[k]*=a.decay);
+      ARCH.forEach((a,k)=> co.sent[k] *= Math.pow(a.decay, 1/BARS_PER_CANDLE));
       if(!co.cur) co.cur={o:co.price,h:co.price,l:co.price,c:co.price,v:0};
       co.cur.c=co.price;
       co.cur.h=Math.max(co.cur.h,co.price);
@@ -556,6 +561,63 @@ function tierOf(co){
   const cap = co.shares * co.price;
   return TIERS.find(t => cap >= t[1]) || TIERS[TIERS.length-1];
 }
+
+/* ── NOSPI · 종합주가지수 ──────────────────────────────
+   상장 전 종목의 시가총액을 제수로 나눈 값. 기준 1000.
+   상장·폐지 때는 제수를 고쳐 지수가 튀지 않게 한다 —
+   실제 지수도 이렇게 한다. 안 하면 기업 하나 만들 때마다
+   지수가 두 배로 뛰어서 아무 의미가 없어진다. */
+const NOSPI = {
+  div: 0, candles: [], cur: null, tick: 0, prev: 1000,
+
+  cap(){ return S.companies.reduce((a,c) => a + c.shares*c.price, 0); },
+
+  value(){
+    const c = this.cap();
+    if(!c) return this.candles.length ? this.prevClose() : 1000;
+    if(!this.div) this.div = c/1000;
+    return c/this.div;
+  },
+
+  prevClose(){
+    const n = this.candles.length;
+    return n ? this.candles[Math.max(0,n-30)].c : 1000;
+  },
+
+  /* 상장·폐지 때 제수를 다시 맞춘다.
+     반드시 '바뀌기 전 지수값'을 인자로 받아야 한다. 변경 후에 값을 읽으면
+     이미 튄 값을 기준으로 잡아서 보정이 아무 일도 하지 않는다. */
+  rebase(before){
+    const c = this.cap();
+    if(c > 0 && before > 0) this.div = c/before;
+  },
+
+  step(){
+    const v = this.value();
+    if(!this.cur) this.cur = {o:v,h:v,l:v,c:v,v:0};
+    this.cur.c = v;
+    this.cur.h = Math.max(this.cur.h, v);
+    this.cur.l = Math.min(this.cur.l, v);
+    if(++this.tick >= BARS_PER_CANDLE){
+      this.candles.push(this.cur);
+      if(this.candles.length > 420) this.candles.shift();
+      this.prev = this.prevClose();
+      this.cur = null; this.tick = 0;
+    }
+  }
+};
+
+/* 지수를 가상 종목처럼 감싼다. 차트·드로잉 코드를 그대로 쓰기 위한 껍데기다.
+   가격은 계산값이므로 getter 로 노출한다. */
+const IDX = {
+  id:'NOSPI', name:'NOSPI', ticker:'NOSPI', country:'—', img:'',
+  desc:'상장 전 종목의 시가총액 가중 지수', owner:'', shares:0,
+  index:true, limit:null, fair:0, mom:0, ref:null,
+  get price(){ return NOSPI.value(); },
+  get prev(){  return NOSPI.prev || 1000; },
+  get candles(){ return NOSPI.candles; },
+  get cur(){ return NOSPI.cur; }
+};
 
 /* ── 장 운영 시간 ───────────────────────────────────────
    09:00 개장, 21:00 마감. 브라우저 현지 시각을 쓴다.
@@ -658,8 +720,11 @@ function tick(co){
   co.mom     = co.mom*0.9 + push*0.1;
   co.volShock= 1 + ((co.volShock||1)-1)*0.995;
 
-  // 심리는 성향별 속도로 식는다
-  ARCH.forEach((a,i)=> co.sent[i]*=a.decay);
+  /* 심리 감쇠. ARCH 의 decay 는 '캔들 하나당' 값이다.
+     이걸 틱마다 곱하면 0.85^16 = 0.07 이 되어 캔들 하나 만에 뉴스가 증발한다.
+     ±100 짜리 뉴스가 나도 1초를 못 버티던 원인이 이것이었다.
+     틱 단위로 환산해서 곱한다. */
+  ARCH.forEach((a,i)=> co.sent[i] *= Math.pow(a.decay, 1/BARS_PER_CANDLE));
 
   if(!co.cur) co.cur={o:co.price,h:co.price,l:co.price,c:co.price,v:0};
   co.cur.c=co.price;
@@ -811,6 +876,7 @@ function open(side){
   const q=Math.max(1, +document.getElementById('qty').value||0);
   const lev=+document.getElementById('lev').value;
 
+  if(co.index) return toast('지수는 직접 거래할 수 없습니다');
   if(!MK.open()) return toast('장이 마감되었습니다');
   if(co.limit==='up' && side==='long')  return toast('상한가입니다. 살 물량이 없습니다');
   if(co.limit==='dn' && side==='short') return toast('하한가입니다. 팔 물량이 없습니다');
@@ -863,7 +929,15 @@ function renderCos(){
   if(!S.companies.length){
     el.innerHTML='<div class="empty">상장된 기업이 없습니다.<br>[+ 신규]로 첫 기업을 만드세요.</div>'; return;
   }
-  el.innerHTML=S.companies.map(c=>{
+  const iv = NOSPI.value(), ip = NOSPI.prev||1000, idd = (iv-ip)/ip*100;
+  const idxRow = `<div class="co idx ${S.sel&&S.sel.index?'on':''}" data-id="NOSPI">
+      <div class="ph" style="background:var(--cyan);color:#000">N</div>
+      <div class="nm"><b>NOSPI</b><small>종합주가지수 · ${S.companies.length}종목</small></div>
+      <div class="pr mono ${idd>0.02?'up':idd<-0.02?'dn':'flat'}">
+        <b>${iv.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</b>${idd>=0?'+':''}${idd.toFixed(2)}%</div>
+    </div>`;
+
+  el.innerHTML = idxRow + S.companies.map(c=>{
     const d=(c.price-c.prev)/c.prev*100, k=d>0.02?'up':d<-0.02?'dn':'flat';
     const badge=c.img?`<img src="${c.img}" alt="">`:`<div class="ph">${c.ticker[0]}</div>`;
     return `<div class="co ${S.sel&&S.sel.id===c.id?'on':''}" data-id="${c.id}">
@@ -876,9 +950,20 @@ function renderCos(){
   el.querySelectorAll('.co').forEach(n=>n.onclick=()=>select(n.dataset.id));
 }
 function select(id){
-  S.sel=S.companies.find(c=>c.id===id);
+  S.sel = id==='NOSPI' ? IDX : S.companies.find(c=>c.id===id);
   VIEW={n:110,off:0}; renderCos(); renderHead(); renderNews(); fit(); paint();
 }
+function renderNospi(){
+  const el = document.getElementById('nospi'); if(!el) return;
+  const v = NOSPI.value(), p = NOSPI.prev || 1000;
+  const d = (v-p)/p*100;
+  el.textContent = v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  el.style.color = d>0.02?'var(--rise)':d<-0.02?'var(--fall)':'';
+  const dl = document.getElementById('nospiD');
+  dl.textContent = (d>=0?'▲':'▼') + Math.abs(d).toFixed(2) + '%';
+  dl.style.color = el.style.color || 'var(--ink-dim)';
+}
+
 function renderMarket(){
   const on = MK.open(), dot=document.getElementById('mkDot'), txt=document.getElementById('mkTxt');
   if(!dot) return;
@@ -894,7 +979,7 @@ function renderHead(){
   const btn=document.getElementById('editCo');
   if(btn){
     const myId=(window.FB&&FB.on)?FB.uid:S.me.id;
-    btn.style.display = (co && (co.owner===myId || S.me.admin)) ? '' : 'none';
+    btn.style.display = (co && !co.index && (co.owner===myId || S.me.admin)) ? '' : 'none';
   }
   if(!co) return;
   const tag=document.getElementById('limitTag');
@@ -903,12 +988,17 @@ function renderHead(){
     tag.textContent = co.limit==='up' ? '상한가' : '하한가';
     tag.style.color = co.limit==='up' ? 'var(--rise)' : 'var(--fall)';
   }
-  const tr=tierOf(co);
   const tt=document.getElementById('tierTag');
-  if(tt){ tt.textContent=tr[0]; tt.className='tier t'+TIERS.indexOf(tr); }
+  if(tt){
+    if(co.index){ tt.textContent='지수'; tt.className='tier t0'; }
+    else { const tr=tierOf(co); tt.textContent=tr[0]; tt.className='tier t'+TIERS.indexOf(tr); }
+  }
   const d=(co.price-co.prev)/co.prev*100;
-  document.getElementById('cName').textContent=`${co.name} (${co.ticker})`;
-  document.getElementById('cPrice').textContent=Math.round(co.price).toLocaleString();
+  document.getElementById('cName').textContent =
+    co.index ? 'NOSPI 종합주가지수' : `${co.name} (${co.ticker})`;
+  document.getElementById('cPrice').textContent = co.index
+    ? co.price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})
+    : Math.round(co.price).toLocaleString();
   const chg=document.getElementById('cChg');
   chg.textContent=`${d>=0?'▲':'▼'} ${Math.abs(d).toFixed(2)}%`;
   chg.className='mono '+(d>=0?'up':'dn');
@@ -936,7 +1026,7 @@ function renderPos(){
 }
 function renderNews(){
   const el=document.getElementById('newsList');
-  const list=S.news.filter(n=>!S.sel||n.cid===S.sel.id||n.cid==='*').slice(0,40);
+  const list=S.news.filter(n=>!S.sel||S.sel.index||n.cid===S.sel.id||n.cid==='*').slice(0,40);
   if(!list.length){ el.innerHTML='<div class="empty">아직 소식이 없습니다</div>'; return; }
   el.innerHTML=list.map(n=>{
     const cls=n.src==='젬민이'?'gem':n.src==='매크로'?'macro':n.src==='뉴스'?'wire':'ceo';
@@ -1088,6 +1178,7 @@ document.getElementById('editCo').onclick=()=>{
 /* 상장폐지. 기업만 지우면 뉴스와 포지션이 유령 참조로 남아
    평가손익 계산이 깨진다. 함께 정리한다. */
 function delistCompany(cid){
+  const idxBefore = NOSPI.value();      // 폐지 전 지수
   const co = S.companies.find(c=>c.id===cid);
   const name = co ? co.name : '';
 
@@ -1098,6 +1189,7 @@ function delistCompany(cid){
   S.positions = S.positions.filter(p=>p.cid!==cid);
 
   S.companies = S.companies.filter(c=>c.id!==cid);
+  NOSPI.rebase(idxBefore);              // 폐지로 시총이 줄어도 지수는 그대로
   S.news      = S.news.filter(n=>n.cid!==cid);
   delete S.draws[cid];
   Sim.hold.delete(cid);
@@ -1379,6 +1471,8 @@ setInterval(()=>{
   document.getElementById('clock').textContent=`${String((s/60|0)%60).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
   if(S.sel){ renderHead(); paint(); }
   MK.sync();
+  if(MK.open()) NOSPI.step();
+  renderNospi();
   checkLiq();
   renderCos(); renderWallet(); renderPos();
   if(++saveT%4===0) renderGemBadge();
