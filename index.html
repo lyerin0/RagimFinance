@@ -290,7 +290,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09k';
+const BUILD = '2026-08-09q';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -501,7 +501,10 @@ function applyNews(co, {impact, horizon='mid', confidence=.7, volatility=1}){
     co.sent[i] = clamp(co.sent[i], -3.5, 3.5);
   });
   co.fair *= (1 + impact*confidence*mix.f*reach);
-  co.volShock = (co.volShock||1) + (volatility-1)*0.8*reach;
+  /* 변동성 충격에는 반드시 상한이 있어야 한다. 이 값이 잡음에 그대로
+     곱해지므로, 뉴스가 쌓이면 8, 20 까지 올라가 캔들 하나가 70% 를
+     오가는 '타워'가 된다. 소형주는 reach 까지 곱해져 더 빨리 터진다. */
+  co.volShock = clamp((co.volShock||1) + (volatility-1)*0.55*reach, 1, 2.6);
 }
 
 const TICK_MS = 500, BARS_PER_CANDLE = 16;
@@ -566,7 +569,7 @@ const MOOD = {
   v: 0,
   /* 이 값은 '수준'이지 '수익률'이 아니다. 캔들마다 fair 에 곱해지므로
      0.0025 같은 값을 쓰면 하루 만에 주가가 몇 원이 된다. 아주 작아야 한다. */
-  step(){ this.v = clamp(this.v*0.994 + gauss()*0.00004, -0.0025, 0.0025); }
+  step(){ this.v = clamp(this.v*0.994 + gauss()*0.000018, -0.0012, 0.0012); }
 };
 
 /* 기업 가치의 표류. 재료가 없어도 시장은 기업을 매일 다시 평가한다.
@@ -574,10 +577,16 @@ const MOOD = {
    캔들 하나마다 한 번씩 부른다. */
 function driftFair(co){
   const t = tierOf(co);
-  const own = gauss()*0.0022*t[3];      // 기업 고유 재평가 — 잡주일수록 크다
+  const own = gauss()*0.0011*(0.6+t[3]*0.45);   // 기업 고유 재평가 — 잡주일수록 크다
   const mkt = MOOD.v*(0.6 + t[3]*0.35); // 시장 분위기 — 대형주가 지수를 더 따라간다
-  const mu  = 0.00010;                  // 완만한 우상향
+  const mu  = 0.00005;                  // 완만한 우상향
   co.fair = Math.max(1, co.fair*(1 + mu + own + mkt));
+
+  /* 적정가가 상하한가 밴드 밖으로 달아나면 가격이 영영 못 따라간다.
+     벽에 붙은 채 일자로 눕는 원인이 이것이었다. 밴드 안쪽으로 되당긴다. */
+  const hi = co.ref*(1+LIMIT)*0.97, lo = co.ref*(1-LIMIT)*1.03;
+  if(co.fair > hi) co.fair = hi + (co.fair-hi)*0.15;
+  if(co.fair < lo) co.fair = lo - (lo-co.fair)*0.15;
 }
 
 const TIERS = [
@@ -725,20 +734,39 @@ const FEE_RATE   = 0.00015;   // 증권사 수수료 0.015% (진입·청산 양�
 const TAX_RATE   = 0.0018;    // 거래세 0.18% (청산할 때만)
 const MAINT      = 0.15;      // 유지증거금 15%. 밑으로 내려가면 강제 청산
 const LIMIT      = 0.30;      // 상하한가 ±30%
-const DAY_BARS   = 225;       // 기준가를 갱신하는 주기 (캔들 225개 = 실시간 30분)
+const DAY_BARS   = 90;        // 기준가 갱신 주기 (캔들 90개 = 실시간 12분)
 
 const MAX_PUSH = 0.012;      // 한 틱 최대 1.2%. 캔들당 16틱이라 이것도 넉넉하다
 
 function tick(co){
   if(!MK.open()) return;                          // 마감 중에는 시세가 움직이지 않는다
-  if(!co.ref){ co.ref=co.price; co.refAge=0; }   // 예전 기업 데이터 보정
+  /* 예전 데이터 보정. 수신자로 오래 있으면 기준가가 갱신되지 않아
+     옛 값에 얼어붙고, 그 상태로 호스트가 되면 가격이 천장에 붙는다.
+     기준가가 현재가와 크게 어긋나 있으면 지금 값으로 다시 잡는다. */
+  if(!co.ref || co.price > co.ref*(1+LIMIT)*1.02 || co.price < co.ref*(1-LIMIT)*0.98){
+    co.ref = co.price; co.refAge = 0; co.pin = 0;
+  }
+  if(co.fair > co.price*2.2 || co.fair < co.price*0.45) co.fair = co.price;
   const t    = tierOf(co);
   const flow = Sim.step(co);
-  const liq  = co.shares*t[2];                        // 대형주는 같은 주문에 덜 움직인다
-  const push = clamp(flow.net/liq, -MAX_PUSH*t[3], MAX_PUSH*t[3]);
-  /* 신호와 무관한 수급. 실제로도 자금 사정 때문에 사고파는 사람이 늘 있다. */
-  const noise= gauss()*0.0016*t[3]*(co.volShock||1);
-  co.price   = Math.max(1, co.price*(1+push+noise));
+  /* 유동성. 발행주식수에 그대로 비례시키면 4천만주 기업과 40만주 기업의
+     유동성이 344배 벌어져서, 소형주는 매 틱 충격 상한에 붙어 있게 된다.
+     그 결과가 캔들 하나가 위아래로 길게 뻗는 '타워'다.
+     실제로는 기업이 크면 참여자도 늘어나므로 지수를 눌러 완만하게 만든다. */
+  const liq  = 66 * Math.pow(co.shares, 0.76) * t[2];
+
+  /* 등급 차이는 유동성(liq)이 만들어야 한다. 예전에는 변동성 배수를
+     가격 충격 상한에까지 곱해서, 잡주가 한 틱에 3.1% 씩 움직였다.
+     그러면 캔들 두어 개 만에 상하한가 벽에 닿아 일자로 눕는다.
+     상한은 안전장치이므로 등급별로 완만하게만 벌린다. */
+  const vm   = 0.7 + t[3]*0.22;                       // 대형 0.83 … 잡주 1.27
+  const push = clamp(flow.net/liq, -MAX_PUSH*vm, MAX_PUSH*vm);
+  const noise= gauss()*0.0016*vm*(co.volShock||1);
+
+  /* 예전에는 push 만 묶고 noise 는 열어두었다. volShock 이 붙은 noise 가
+     한 틱에 몇 % 씩 튀면서 캔들이 위아래로 길게 늘어졌다. 합쳐서 묶는다. */
+  const move = clamp(push + noise, -MAX_PUSH*vm*1.7, MAX_PUSH*vm*1.7);
+  co.price   = Math.max(1, co.price*(1+move));
 
   /* 상하한가. 한국 시장처럼 기준가 대비 ±30% 에서 막는다.
      폭주 방지책이자, 벽에 닿으면 그 자체로 사건이 된다. */
@@ -749,7 +777,7 @@ function tick(co){
     else co.limit=null;
   }
 
-  co.mom     = co.mom*0.9 + push*0.1;
+  co.mom     = co.mom*0.9 + move*0.1;
   co.volShock= 1 + ((co.volShock||1)-1)*0.995;
 
   /* 심리 감쇠. ARCH 의 decay 는 '캔들 하나당' 값이다.
@@ -769,7 +797,12 @@ function tick(co){
     if(co.candles.length>420) co.candles.shift();
     co.cur=null; co.tick=0;
     driftFair(co);
-    if(++co.refAge>=DAY_BARS){ co.ref=co.price; co.refAge=0; }   // 기준가 갱신
+
+    /* 연속 상한가/하한가. 벽에 계속 붙어 있으면 기준가를 바로 옮긴다.
+       안 그러면 다음 갱신까지 몇 분 동안 완전한 일자가 된다. */
+    co.pin = co.limit ? (co.pin||0)+1 : 0;
+    if(co.pin >= 5){ co.ref=co.price; co.refAge=0; co.pin=0; }
+    else if(++co.refAge>=DAY_BARS){ co.ref=co.price; co.refAge=0; }
   }
 }
 
@@ -970,7 +1003,11 @@ function renderCos(){
         <b>${iv.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</b>${idd>=0?'+':''}${idd.toFixed(2)}%</div>
     </div>`;
 
-  el.innerHTML = idxRow + S.companies.map(c=>{
+  /* 주가가 높은 순으로 세운다. S.companies 자체를 정렬하면 방송·저장
+     순서까지 흔들리므로, 그리기용 사본만 정렬한다. */
+  const rows = S.companies.slice().sort((a,b)=> b.price - a.price);
+
+  el.innerHTML = idxRow + rows.map(c=>{
     const d=(c.price-c.prev)/c.prev*100, k=d>0.02?'up':d<-0.02?'dn':'flat';
     const badge=c.img?`<img src="${c.img}" alt="">`:`<div class="ph">${c.ticker[0]}</div>`;
     return `<div class="co ${S.sel&&S.sel.id===c.id?'on':''}" data-id="${c.id}">
