@@ -25,7 +25,7 @@ import {
 import { getAuth, signInAnonymously, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 
-const FB_BUILD = '2026-08-09f';
+const FB_BUILD = '2026-08-09h';
 console.log('%c[FB] firebase.js build ' + FB_BUILD, 'color:#3ecfcf;font-weight:bold');
 
 const TAPE_MS  = 6000;    // 시세 방송 주기. 아래 '무료 한도' 주석 참고
@@ -171,16 +171,16 @@ const FB = {
     });
 
     onSnapshot(doc(this.db,'world','tape'), snap => {
-      const t = snap.data();
-      if(t && this.guest){
-        if(t.nd) NOSPI.div = t.nd;
-        if(t.nk){ try{
-          NOSPI.candles = JSON.parse(t.nk).map(b=>({o:b[0],h:b[1],l:b[2],c:b[3],v:0}));
-          NOSPI.prev = NOSPI.prevClose();
-        }catch(e){} }
-      }
       if(!snap.exists() || !this.guest) return;
       const t = snap.data();
+
+      // 지수는 제수까지 같이 받아야 모두가 같은 값을 본다
+      if(t.nd) NOSPI.div = t.nd;
+      if(t.nk){ try{
+        NOSPI.candles = JSON.parse(t.nk).map(b=>({o:b[0],h:b[1],l:b[2],c:b[3],v:0}));
+        NOSPI.prev = NOSPI.prevClose();
+      }catch(e){} }
+
       S.fx = t.fx || S.fx;
       Object.entries(t.px || {}).forEach(([cid, v]) => {
         const co = S.companies.find(c => c.id === cid);
