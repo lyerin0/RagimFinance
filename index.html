@@ -293,7 +293,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09s';
+const BUILD = '2026-08-09t';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -1628,6 +1628,12 @@ function fire(n){
 window.applyScore = function(id, v){
   const n=S.news.find(x=>x.id===id);
   if(!n || !n.pending) return;
+  /* 대상 기업 재지정. '+뉴스' 로 쓴 기사는 일단 전 종목(*)으로 들어오지만,
+     특정 기업 얘기면 그 기업으로 옮겨야 한다. 전쟁·금리처럼 정말 시장
+     전체를 흔드는 내용만 * 로 남는다. */
+  if(v.cid && v.cid !== n.cid && (n.src==='뉴스' || n.src==='매크로')){
+    if(v.cid === '*' || S.companies.some(c=>c.id===v.cid)) n.cid = v.cid;
+  }
   n.impact     = clamp(v.impact ?? 0, -1, 1);
   n.horizon    = v.horizon || n.horizon;
   n.confidence = v.confidence ?? n.confidence;
@@ -1635,8 +1641,30 @@ window.applyScore = function(id, v){
   n.pending    = false; n.fresh = true;
   fire(n); persist(); renderNews();
   if(window.FB&&FB.on) FB.patchNews(id, {impact:n.impact, horizon:n.horizon,
-    confidence:n.confidence, volatility:n.volatility, pending:false});
+    confidence:n.confidence, volatility:n.volatility, pending:false, cid:n.cid});
 };
+
+/* Gemini 가 못 붙었을 때의 대상 기업 추정.
+   표기 정규화 후 이름·티커가 본문에 있는지만 본다.
+   한국어↔영어 대응은 Gemini 몫이고 여기서는 못 한다. */
+function guessTarget(txt){
+  const norm = x => (x||'').toLowerCase()
+    .replace(/[㈜()（）.,'"·\-\s]/g,'')
+    .replace(/주식회사|inc|corp|co|ltd|그룹|holdings/g,'');
+  /* '라김기업' 을 통째로 찾으면 '㈜라김' 을 못 잡는다.
+     흔한 접미사를 떼어낸 핵심어로도 맞춰본다. */
+  const core = x => x.replace(/(기업|그룹|테크|전자|산업|엔지니어링|시스템|네트웍스|파트너스)$/,'');
+  const t = norm(txt);
+  let best = null, len = 0;
+  const hit = (key, id) => {
+    if(key && key.length >= 2 && t.includes(key) && key.length > len){ best=id; len=key.length; }
+  };
+  S.companies.forEach(c=>{
+    const nm = norm(c.name);
+    hit(nm, c.id); hit(core(nm), c.id); hit(norm(c.ticker), c.id);
+  });
+  return best;
+}
 
 /* Gemini 없을 때 쓰는 임시 감성 점수 (워커 붙이면 대체됨) */
 function localScore(txt){
@@ -1686,13 +1714,15 @@ setInterval(()=>{
   if(!isEngine()) return;              // 여러 창이 각자 채점하면 값이 엇갈린다
   const now=Date.now(); let hit=false;
   S.news.forEach(n=>{
-    if(n.pending && now - n.ts > 120000){
-      window.applyScore(n.id, {impact: localScore(n.title+' '+n.body)});
+    if(n.pending && now - n.ts > 60000){
+      const guess = (n.src==='뉴스') ? guessTarget(n.title+' '+n.body) : null;
+      window.applyScore(n.id, { impact: localScore(n.title+' '+n.body),
+                                cid: guess || n.cid });
       hit=true;
     }
   });
   if(hit) toast('AI 판정이 지연되어 임시 점수로 반영했습니다');
-}, 20000);
+}, 8000);
 
 let saveT=0;
 setInterval(()=>{
