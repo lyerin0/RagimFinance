@@ -157,6 +157,9 @@ body{
 .src.gem{background:rgba(181,124,232,.16);color:var(--gem)}
 .src.macro{background:rgba(62,207,207,.12);color:var(--cyan)}
 .src.wire{background:rgba(232,232,232,.10);color:var(--ink)}
+.news .eff{font-size:10px;color:var(--ink-dim);line-height:1.6;margin:3px 0 5px;
+  padding:4px 6px;border-left:2px solid var(--rule);background:rgba(255,255,255,.02)}
+.news .eff .up{color:var(--rise)} .news .eff .dn{color:var(--fall)}
 .co.idx{border-bottom:1px solid var(--rule);background:rgba(62,207,207,.04)}
 .tier{padding:0 4px;border-radius:2px;font-size:9px;letter-spacing:0}
 .tier.t0{background:rgba(62,207,207,.14);color:var(--cyan)}
@@ -290,7 +293,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09r';
+const BUILD = '2026-08-09s';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -1163,12 +1166,22 @@ function renderNews(){
   el.innerHTML=list.map(n=>{
     const cls=n.src==='젬민이'?'gem':n.src==='매크로'?'macro':n.src==='뉴스'?'wire':'ceo';
     const im=n.impact??0;
+    const co = n.cid==='*' ? null : S.companies.find(c=>c.id===n.cid);
+    const target = n.cid==='*' ? '전 종목' : (co ? co.name : '상장폐지된 기업');
+    const mixF = n.horizon==='short' ? 0.22 : n.horizon==='long' ? 0.78 : 0.50;
+    const reach = co ? tierOf(co)[4] : 0.6;
+    const est = im*(n.confidence??0.7)*mixF*reach*(n.cid==='*'?0.45:1)*100;
+    const life = n.horizon==='short' ? '단기 재료' : n.horizon==='long' ? '장기 재료' : '중기 재료';
+    const effect = n.pending ? ''
+      : `<div class="eff">${esc(target)} · ${life} ·
+          기업가치 <b class="${est>=0?'up':'dn'}">${est>=0?'+':''}${est.toFixed(1)}%</b>
+          <span style="opacity:.6">· 심리 충격은 별도로 단기간 더 크게 움직입니다</span></div>`;
     const score = n.pending
       ? `<span class="imp mono" style="color:var(--gem)">판정중…</span>`
       : `<span class="imp mono ${im>=0?'up':'dn'}">${im>=0?'+':''}${(im*100).toFixed(0)}</span>`;
     return `<div class="news ${n.fresh?'gemhit':''}">
       <div class="meta"><span class="src ${cls}">${n.src}</span><span>${n.by||''}</span>${score}</div>
-      <h4>${esc(n.title)}</h4><p>${esc(n.body).slice(0,220)}</p></div>`;
+      <h4>${esc(n.title)}</h4>${effect}<p>${esc(n.body).slice(0,220)}</p></div>`;
   }).join('');
   S.news.forEach(n=>n.fresh=false);
 }
@@ -1565,7 +1578,15 @@ document.getElementById('adminBtn').onclick=()=>{
    Gemini가 켜져 있으면 impact를 비워두고 대기열에 넣는다 —
    판정이 오기 전까지 주가는 안 움직인다. 꺼져 있으면 로컬 채점. */
 function post({cid,src,by,title,body,impact,horizon,confidence,volatility}){
-  const wait = (impact===undefined||impact===null) && window.Gem && Gem.ready();
+  /* 판정을 기다릴지는 '글쓴 사람'이 아니라 '호스트'가 정해야 한다.
+     예전에는 작성자 브라우저의 Gem.ready() 로 판단해서, Gemini 키가 없는
+     친구가 쓰면 그 자리에서 로컬 채점으로 확정돼 pending 이 꺼졌다.
+     그러면 호스트의 Gemini 는 그 기사를 아예 보지 못하고,
+     젬민이도 반박할 기회가 없었다. 서버 모드면 무조건 판정을 기다린다.
+     호스트가 2분 안에 채점하지 못하면 폴백이 로컬 점수로 확정한다. */
+  const server = !!(window.FB && FB.on);
+  const wait = (impact===undefined||impact===null)
+             && (server || (window.Gem && Gem.ready()));
   const n={
     id:uid(), cid, src, by, title, body, ts:Date.now(), fresh:true,
     horizon:horizon||'mid', confidence:confidence??0.7, volatility:volatility||1,
@@ -1596,7 +1617,11 @@ function fire(n){
     return;
   }
   const co=S.companies.find(c=>c.id===n.cid);
-  if(co) applyNews(co, v);
+  if(co){
+    applyNews(co, v);
+    const pct = Math.round((n.impact||0)*100);
+    toast(`${co.name} — 재료 반영 ${pct>=0?'+':''}${pct}`);
+  }
 }
 
 /* Gemini 판정이 도착하면 여기로 들어온다 */
