@@ -290,7 +290,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09q';
+const BUILD = '2026-08-09r';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -325,6 +325,43 @@ const persist = () => {
   DB.set('draws',S.draws); DB.set('fx',S.fx);
   if(!window.FIREBASE_CONFIG){            // 서버 모드에선 기업·뉴스의 정본이 Firestore 다
     DB.set('companies',S.companies); DB.set('news',S.news);
+  }
+  saveCandles();
+};
+
+/* 캔들 이력을 따로 남긴다. 예전에는 어디에도 저장하지 않아서
+   새로고침하면 차트가 빈 상태에서 다시 그려졌다.
+   소수점을 버리고 [o,h,l,c] 만 담아 용량을 줄인다. */
+const saveCandles = () => {
+  try{
+    const px = {};
+    S.companies.forEach(c => {
+      if(c.candles.length) px[c.id] = c.candles.slice(-260)
+        .map(b => [Math.round(b.o), Math.round(b.h), Math.round(b.l), Math.round(b.c)]);
+    });
+    DB.set('hist', { px, ref:Object.fromEntries(S.companies.map(c=>[c.id, c.ref||0])),
+      nk: NOSPI.candles.slice(-260).map(b=>[+b.o.toFixed(2),+b.h.toFixed(2),+b.l.toFixed(2),+b.c.toFixed(2)]),
+      nd: NOSPI.div, at: Date.now() });
+  }catch(e){}
+};
+
+/* 부팅 직후 로컬 이력을 먼저 붙여 화면이 비어 보이지 않게 한다.
+   서버 방송이 오면 그쪽 값이 정본이므로 덮인다. */
+const loadCandles = () => {
+  const h = DB.get('hist', null);
+  if(!h) return;
+  S.companies.forEach(c => {
+    const rows = h.px && h.px[c.id];
+    if(rows && rows.length && !c.candles.length){
+      c.candles = rows.map(r => ({o:r[0],h:r[1],l:r[2],c:r[3],v:0}));
+      c.price = c.candles[c.candles.length-1].c;
+      if(h.ref && h.ref[c.id]) c.ref = h.ref[c.id];
+    }
+  });
+  if(h.nk && h.nk.length && !NOSPI.candles.length){
+    NOSPI.candles = h.nk.map(r => ({o:r[0],h:r[1],l:r[2],c:r[3],v:0}));
+    NOSPI.prev = NOSPI.prevClose();
+    if(h.nd) NOSPI.div = h.nd;
   }
 };
 
@@ -1654,6 +1691,7 @@ setInterval(()=>{
 
 /* 초기 부팅 */
 if(!window.FIREBASE_CONFIG) S.me.admin = true;   // 로컬 단독 실행이면 혼자 다 한다
+loadCandles();
 fit(); if(S.companies.length) select(S.companies[0].id); renderWallet(); renderPos();
 </script>
 <script src="gemini.js"></script>
