@@ -290,7 +290,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09h';
+const BUILD = '2026-08-09j';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -550,6 +550,36 @@ window.catchUp = function(elapsedMs){
 /* 기업 규모. 시가총액으로 자동 분류한다. 따로 입력받지 않는다 —
    주가가 오르면 잡주가 소형주가 되고, 폭락하면 반대로 내려간다.
    등급마다 차트 성격이 달라진다: 대형주는 무겁게, 잡주는 미친 듯이. */
+/* 정규분포 난수. 균등난수로 표류를 만들면 움직임이 기계적으로 보인다. */
+function gauss(){
+  let u=0,v=0;
+  while(!u) u=Math.random();
+  while(!v) v=Math.random();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
+}
+
+/* ── 시장 분위기 ────────────────────────────────────────
+   재료가 없어도 시장 전체가 함께 오르내린다. 이게 없으면
+   종목들이 서로 무관하게 흔들려서 지수에 추세가 생기지 않는다.
+   평균 0 으로 되돌아오는 표류라 한쪽으로 폭주하지 않는다. */
+const MOOD = {
+  v: 0,
+  /* 이 값은 '수준'이지 '수익률'이 아니다. 캔들마다 fair 에 곱해지므로
+     0.0025 같은 값을 쓰면 하루 만에 주가가 몇 원이 된다. 아주 작아야 한다. */
+  step(){ this.v = clamp(this.v*0.994 + gauss()*0.00004, -0.0025, 0.0025); }
+};
+
+/* 기업 가치의 표류. 재료가 없어도 시장은 기업을 매일 다시 평가한다.
+   이것이 없으면 적정가가 고정되고, 가격이 거기 붙어 일자가 된다.
+   캔들 하나마다 한 번씩 부른다. */
+function driftFair(co){
+  const t = tierOf(co);
+  const own = gauss()*0.0022*t[3];      // 기업 고유 재평가 — 잡주일수록 크다
+  const mkt = MOOD.v*(0.6 + t[3]*0.35); // 시장 분위기 — 대형주가 지수를 더 따라간다
+  const mu  = 0.00010;                  // 완만한 우상향
+  co.fair = Math.max(1, co.fair*(1 + mu + own + mkt));
+}
+
 const TIERS = [
   // 이름     기준시총   유동성  잡음   뉴스반응
   ['대형주', 1.0e12,    0.055,  0.6,   0.55],
@@ -690,6 +720,7 @@ function gapOpen(){
   toast(`밤사이 소식 ${held.length}건이 시가에 반영되었습니다`);
 }
 
+const FX_BASE    = 1380;      // 환율이 되돌아가는 기준
 const FEE_RATE   = 0.00015;   // 증권사 수수료 0.015% (진입·청산 양쪽)
 const TAX_RATE   = 0.0018;    // 거래세 0.18% (청산할 때만)
 const MAINT      = 0.15;      // 유지증거금 15%. 밑으로 내려가면 강제 청산
@@ -705,7 +736,8 @@ function tick(co){
   const flow = Sim.step(co);
   const liq  = co.shares*t[2];                        // 대형주는 같은 주문에 덜 움직인다
   const push = clamp(flow.net/liq, -MAX_PUSH*t[3], MAX_PUSH*t[3]);
-  const noise= (Math.random()-0.5)*0.0022*t[3]*(co.volShock||1);
+  /* 신호와 무관한 수급. 실제로도 자금 사정 때문에 사고파는 사람이 늘 있다. */
+  const noise= gauss()*0.0016*t[3]*(co.volShock||1);
   co.price   = Math.max(1, co.price*(1+push+noise));
 
   /* 상하한가. 한국 시장처럼 기준가 대비 ±30% 에서 막는다.
@@ -736,6 +768,7 @@ function tick(co){
     co.candles.push(co.cur);
     if(co.candles.length>420) co.candles.shift();
     co.cur=null; co.tick=0;
+    driftFair(co);
     if(++co.refAge>=DAY_BARS){ co.ref=co.price; co.refAge=0; }   // 기준가 갱신
   }
 }
@@ -1250,11 +1283,11 @@ function delistCompany(cid){
   toast(`${name} 상장폐지 완료`);
 }
 
-const WIRE_COOL = 5*60*1000;      // 같은 사람이 5분에 한 번만
+const WIRE_COOL = 150*1000;       // 같은 사람이 2분 30초에 한 번만
 
 document.getElementById('newWire').onclick=()=>{
   const left = WIRE_COOL - (Date.now() - (S.me.lastWire||0));
-  if(left > 0) return toast(`${Math.ceil(left/60000)}분 뒤에 다시 쓸 수 있습니다`);
+  if(left > 0) return toast(`${Math.ceil(left/1000)}초 뒤에 다시 쓸 수 있습니다`);
 
   openModal('뉴스 작성', `
     <div class="fld"><label>제목</label><input id="w_t" placeholder="예: 기준금리 0.25%p 인상"></div>
@@ -1263,7 +1296,7 @@ document.getElementById('newWire').onclick=()=>{
       특정 기업이 아니라 <b>상장된 모든 종목</b>에 영향을 줍니다.
       대신 개별 기업 기사보다 반영 강도는 약합니다.
       작성자 이름이 함께 남고, 젬민이의 검증 대상이 됩니다.
-      5분에 한 번만 쓸 수 있습니다.</p>`,
+      2분 30초에 한 번만 쓸 수 있습니다.</p>`,
   ()=>{
     const t=modal.querySelector('#w_t').value.trim();
     const b=modal.querySelector('#w_b').value.trim();
@@ -1338,6 +1371,17 @@ document.getElementById('adminBtn').onclick=()=>{
 
     <hr style="border:none;border-top:1px solid var(--rule)">
 
+    <div class="fld"><label>호스트</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <span class="mono" style="flex:1;color:var(--ink-dim)">
+          현재 ${(window.FB&&FB.on)?(FB.guest?'다른 창이 호스트 (수신 중)':'이 창이 호스트'):'로컬 단독'}</span>
+        <button class="btn ghost" id="a_host" style="padding:6px 12px">가져오기</button></div>
+      <div style="font-size:10px;color:var(--ink-dim);margin-top:4px;line-height:1.6">
+        Gemini 는 관리자이면서 호스트인 창에서만 호출됩니다.
+        수신 중이면 AI 판정과 젬민이가 멈춥니다.</div></div>
+
+    <hr style="border:none;border-top:1px solid var(--rule)">
+
     <div class="fld"><label>백업</label>
       <button class="btn ghost" id="a_bk" style="width:100%">마지막 백업에서 복구</button>
       <div style="font-size:10px;color:var(--ink-dim);margin-top:4px;line-height:1.6">
@@ -1384,6 +1428,14 @@ document.getElementById('adminBtn').onclick=()=>{
     }
     persist(); renderCos();
   },'저장');
+
+  modal.querySelector('#a_host').onclick = e => {
+    e.preventDefault();
+    if(!(window.FB && FB.on)) return toast('로컬 단독 실행 중입니다');
+    FB.want = true;
+    toast('다음 갱신에 호스트를 넘겨받습니다');
+    shut();
+  };
 
   modal.querySelector('#a_bk').onclick = e => { e.preventDefault(); restoreBackup(); shut(); };
 
@@ -1520,8 +1572,11 @@ setInterval(()=>{
 
 let saveT=0;
 setInterval(()=>{
-  if(!window.FB || !FB.on || !FB.guest) S.companies.forEach(tick);
-  S.fx += (Math.random()-0.5)*0.9;
+  if(!window.FB || !FB.on || !FB.guest){ if(MK.open()) MOOD.step(); S.companies.forEach(tick); }
+  /* 환율. 예전에는 난수를 그냥 더하기만 해서 제동이 없었고,
+     오래 켜두면 1,380 이 19 원까지 흘러내렸다. 기준값으로 되돌아오게 한다. */
+  S.fx += (FX_BASE - S.fx)*0.002 + gauss()*0.6;
+  S.fx = clamp(S.fx, FX_BASE*0.75, FX_BASE*1.35);
   document.getElementById('fx').textContent=S.fx.toFixed(1);
   const s=((Date.now()-S.t0)/1000)|0;
   document.getElementById('clock').textContent=`${String((s/60|0)%60).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
