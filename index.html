@@ -290,7 +290,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-09g';
+const BUILD = '2026-08-09h';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -1170,13 +1170,59 @@ document.getElementById('editCo').onclick=()=>{
 
   modal.querySelector('#e_del').onclick = e => {
     e.preventDefault();
-    if(!confirm(`'${co.name}' 을(를) 상장폐지합니다.\n관련 기사와 모든 포지션이 함께 사라집니다.\n되돌릴 수 없습니다. 진행할까요?`)) return;
+    /* confirm 한 번으로 기업과 기사가 통째로 날아가는 건 너무 위험하다.
+       티커를 직접 치게 해서 손이 미끄러진 경우를 걸러낸다. */
+    const typed = prompt(
+      `'${co.name}' 을(를) 상장폐지합니다.\n` +
+      `기업, 관련 기사 ${S.news.filter(n=>n.cid===co.id).length}건, 모든 사람의 포지션이 사라집니다.\n` +
+      `되돌릴 수 없습니다.\n\n진행하려면 티커 "${co.ticker}" 를 입력하세요.`);
+    if(typed === null) return;
+    if(typed.trim().toUpperCase() !== co.ticker.toUpperCase())
+      return toast('티커가 일치하지 않습니다. 취소되었습니다');
+    backup();                       // 지우기 직전 스냅샷
     delistCompany(co.id); shut();
   };
 };
 
 /* 상장폐지. 기업만 지우면 뉴스와 포지션이 유령 참조로 남아
    평가손익 계산이 깨진다. 함께 정리한다. */
+/* 삭제 직전 스냅샷을 로컬에 남긴다. Firestore 문서는 되살릴 수 없지만
+   기업 정의와 기사 본문은 여기서 복구해 다시 올릴 수 있다. */
+function backup(){
+  try{
+    localStorage.setItem('sosik_backup', JSON.stringify({
+      at: Date.now(),
+      companies: S.companies.map(c => ({...c, candles:[], cur:null})),
+      news: S.news
+    }));
+  }catch(e){ console.warn('backup', e.message); }
+}
+
+function restoreBackup(){
+  const raw = localStorage.getItem('sosik_backup');
+  if(!raw) return toast('백업이 없습니다');
+  let b; try{ b = JSON.parse(raw); }catch(e){ return toast('백업이 손상되었습니다'); }
+  const when = new Date(b.at).toLocaleString();
+  if(!confirm(`${when} 시점의 백업입니다.\n기업 ${b.companies.length}개, 기사 ${b.news.length}건을 되살립니다.\n진행할까요?`)) return;
+
+  let n=0;
+  b.companies.forEach(c => {
+    if(S.companies.some(x => x.id===c.id)) return;
+    const co = {...c, candles:[], cur:null, tick:0, sent:ARCH.map(()=>0), mom:0};
+    seed(co, 140);
+    S.companies.push(co);
+    if(window.FB && FB.on) FB.addCompany(co);
+    n++;
+  });
+  b.news.forEach(x => {
+    if(S.news.some(y => y.id===x.id)) return;
+    S.news.push({...x, fired:true});
+    if(window.FB && FB.on) FB.addNews(x);
+  });
+  persist(); renderCos(); renderNews();
+  toast(`기업 ${n}개를 복구했습니다`);
+}
+
 function delistCompany(cid){
   const idxBefore = NOSPI.value();      // 폐지 전 지수
   const co = S.companies.find(c=>c.id===cid);
@@ -1292,6 +1338,14 @@ document.getElementById('adminBtn').onclick=()=>{
 
     <hr style="border:none;border-top:1px solid var(--rule)">
 
+    <div class="fld"><label>백업</label>
+      <button class="btn ghost" id="a_bk" style="width:100%">마지막 백업에서 복구</button>
+      <div style="font-size:10px;color:var(--ink-dim);margin-top:4px;line-height:1.6">
+        상장폐지 직전 자동으로 남긴 스냅샷에서 기업과 기사를 되살립니다.
+        차트 이력은 복구되지 않고 새로 생성됩니다.</div></div>
+
+    <hr style="border:none;border-top:1px solid var(--rule)">
+
     <div class="fld"><label>지갑</label>
       <div style="display:flex;gap:6px;align-items:center">
         <span class="mono" style="flex:1;color:var(--ink-dim)">${won(S.me.cash)}</span>
@@ -1330,6 +1384,8 @@ document.getElementById('adminBtn').onclick=()=>{
     }
     persist(); renderCos();
   },'저장');
+
+  modal.querySelector('#a_bk').onclick = e => { e.preventDefault(); restoreBackup(); shut(); };
 
   const mk = (mode) => e => {
     e.preventDefault();
