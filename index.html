@@ -165,6 +165,13 @@ body{
 .tier{padding:0 4px;border-radius:2px;font-size:9px;letter-spacing:0}
 .tier.t0{background:rgba(62,207,207,.14);color:var(--cyan)}
 .tier.t1{background:rgba(232,232,232,.10);color:var(--ink-dim)}
+.co .pr .cap{display:block;font-size:9px;color:var(--ink-dim);letter-spacing:0;margin-top:1px}
+.sec-head #sortBy{font-size:10px;opacity:.75}
+.mtabs{display:flex;gap:2px;background:var(--rule);padding:2px;border-radius:4px}
+.mtabs button{font:inherit;font-size:11px;font-weight:700;letter-spacing:.04em;
+  padding:3px 12px;border:0;border-radius:3px;background:transparent;
+  color:var(--ink-dim);cursor:pointer}
+.mtabs button.on{background:var(--bg);color:var(--ink)}
 .tier.warn{background:rgba(255,176,32,.16);color:var(--amber);margin-left:3px}
 .tier.t2{background:rgba(240,169,44,.14);color:var(--amber)}
 .tier.t3{background:rgba(181,124,232,.18);color:var(--gem)}
@@ -203,12 +210,8 @@ body{
   <div id="topbar">
     <div class="brand">SOSIKTONG <span>가상거래소</span></div>
     <div class="tick mono">
-      <div>NOSPI <b id="nospi" class="mono">1,000.00</b>
-           <b id="nospiD" class="mono" style="font-size:10px"></b></div>
-      <div>NOSDAQ <b id="nosdaq" class="mono">1,000.00</b>
-           <b id="nosdaqD" class="mono" style="font-size:10px"></b></div>
-      <div>NONEX <b id="nonex" class="mono">1,000.00</b>
-           <b id="nonexD" class="mono" style="font-size:10px"></b></div>
+      <div id="mktTabs" class="mtabs"></div>
+      <div id="idxBar" style="display:flex;gap:14px"></div>
       <div>기준금리 <b id="rate" class="mono">2.50%</b></div>
       <div>USD/KRW <b id="fx">1,380.0</b></div>
       <div>투자자 <b id="pop">100,000</b></div>
@@ -224,7 +227,9 @@ body{
   <div id="main">
     <!-- 종목 -->
     <div id="left">
-      <div class="sec-head">상장 기업 <button id="newCo">+ 신규</button></div>
+      <div class="sec-head">상장 기업
+        <button id="sortBy" title="정렬 기준">시총순</button>
+        <button id="newCo">+ 신규</button></div>
       <div id="coList"></div>
     </div>
 
@@ -234,6 +239,7 @@ body{
         <div class="title" id="cName">—</div>
         <div class="last mono" id="cPrice">—</div>
         <div class="mono" id="cChg" style="font-size:12px"></div>
+        <div class="mono" id="cCap" style="font-size:11px;color:var(--ink-dim)"></div>
         <span id="tierTag" class="tier" style="margin-right:4px"></span>
         <div class="mono" id="limitTag" style="font-size:10px;font-weight:700;
              letter-spacing:.1em;padding:2px 6px;border:1px solid currentColor;
@@ -300,7 +306,7 @@ const DB = {
   set(k,v){ this.load(); this.cache[k]=v; this.save(); }
 };
 
-const BUILD = '2026-08-10c';
+const BUILD = '2026-08-11a';
 console.log('%cSOSIKTONG build ' + BUILD, 'color:#f0a92c;font-weight:bold');
 
 const uid  = () => Math.random().toString(36).slice(2,10);
@@ -321,6 +327,7 @@ const S = {
   admins:    [],
   sel:       null,
   tool:      'cursor',
+  sort:      DB.get('sort','cap'),   // cap | price | chg
   draws:     DB.get('draws', {}),   // companyId -> [line]
   t0:        Date.now()
 };
@@ -355,7 +362,7 @@ const saveCandles = () => {
         k: x.candles.slice(-260).map(b=>[+b.o.toFixed(2),+b.h.toFixed(2),+b.l.toFixed(2),+b.c.toFixed(2)])
       }])),
       board: Object.fromEntries(S.companies.map(c=>[c.id, boardOf(c)])),
-      rate: RATE.v, at: Date.now() });
+      rate: { KR:RATE.KR, US:RATE.US }, at: Date.now() });
   }catch(e){}
 };
 
@@ -373,7 +380,10 @@ const loadCandles = () => {
     }
   });
   if(h.board) S.companies.forEach(c=>{ if(!c.board && h.board[c.id]) c.board = h.board[c.id]; });
-  if(typeof h.rate === 'number') RATE.v = h.rate;
+  if(h.rate && typeof h.rate === 'object'){
+    if(typeof h.rate.KR==='number') RATE.KR = h.rate.KR;
+    if(typeof h.rate.US==='number') RATE.US = h.rate.US;
+  } else if(typeof h.rate === 'number') RATE.KR = h.rate;
   if(h.ix) Object.entries(h.ix).forEach(([k,d])=>{
     const x = INDICES[k]; if(!x || x.candles.length || !d.k || !d.k.length) return;
     x.candles = d.k.map(r => ({o:r[0],h:r[1],l:r[2],c:r[3],v:0}));
@@ -446,7 +456,7 @@ const Sim = {
       const lot  = Math.max(1, Math.round(this.risk[i]*a.turn*90));
       const cost = co.price*lot;
 
-      const gate = 0.42 + RATE.bar();     // 금리가 높으면 매수 문턱이 올라간다
+      const gate = 0.42 + RATE.bar(co);     // 금리가 높으면 매수 문턱이 올라간다
       if(sig > gate){
         if(h[i] < 0){
           /* 숏 환매. 공매도할 때 대금을 현금으로 주지 않았으므로
@@ -507,17 +517,27 @@ function shrinkImage(file, size=128){
 }
 
 function makeCompany({name, ticker, desc, img, country, price, shares}){
-  const idxBefore = NONEX.value();     // 신규 상장은 성장시장에서 시작한다
-  const p = price||50000;
+  const ctry = (country||'KR').toUpperCase();
+  const us   = ctry === 'US';
+  const p    = price || (us ? 40 : 50000);
+  const sh   = shares || 1_000_000;
+
+  /* 국적이 US 면 미국 거래소로 간다. 규모를 보고 NASDAQ 이냐
+     NYSE American 이냐가 갈린다. NYSE 는 승급으로만 올라간다. */
+  const start = us
+    ? (p*sh >= BOARDS.NASDAQ.cap && p >= BOARDS.NASDAQ.price ? 'NASDAQ' : 'NYSEA')
+    : 'NONEX';
+  const idxBefore = INDICES[start].value();
+
   const co = {
     id:uid(), name, ticker:(ticker||name.slice(0,3)).toUpperCase(),
-    desc:desc||'', img:img||'', country:country||'KR',
-    price:p, prev:p, fair:p, shares:shares||1_000_000, board:'NONEX', warn:0,
+    desc:desc||'', img:img||'', country:ctry,
+    price:p, prev:p, fair:p, shares:sh, board:start, warn:0,
     owner:S.me.id, ownerName:S.me.name,
     mom:0, sent:ARCH.map(()=>0), candles:[], cur:null, tick:0
   };
   seed(co, 140);
-  setTimeout(() => NONEX.rebase(idxBefore), 0);
+  setTimeout(() => INDICES[start].rebase(idxBefore), 0);
   return co;
 }
 function seed(co, n){
@@ -634,7 +654,7 @@ function driftFair(co){
   const t = tierOf(co);
   const own = gauss()*0.0011*(0.6+t[3]*0.45);   // 기업 고유 재평가 — 잡주일수록 크다
   const mkt = MOOD.v*(0.6 + t[3]*0.35); // 시장 분위기 — 대형주가 지수를 더 따라간다
-  const mu  = 0.00005 + RATE.drag();    // 완만한 우상향 — 금리가 높으면 눌린다
+  const mu  = 0.00005 + RATE.drag(co);    // 완만한 우상향 — 금리가 높으면 눌린다
   co.fair = Math.max(1, co.fair*(1 + mu + own + mkt));
 
   /* 적정가가 상하한가 밴드 밖으로 달아나면 가격이 영영 못 따라간다.
@@ -652,7 +672,7 @@ const TIERS = [
   ['잡주',   0,         0.008,  2.6,   1.90]
 ];
 function tierOf(co){
-  const cap = co.shares * co.price;
+  const cap = capKRW(co);
   return TIERS.find(t => cap >= t[1]) || TIERS[TIERS.length-1];
 }
 
@@ -666,37 +686,81 @@ function tierOf(co){
    투자자의 위험선호도 낮아져 매수 문턱이 올라간다.
    관리자가 조절하고 전 접속자에게 동기화된다. */
 const RATE = {
-  v: 2.50,                                  // % 연리
-  set(x){ this.v = clamp(+x||0, 0, 20);
-          if(window.FB && FB.on) FB.setRate(this.v);
+  KR: 2.50, US: 4.25,                       // % 연리. 나라마다 따로 논다.
+  get v(){ return this[VIEW_MKT]; },
+  of(co){ return this[mktOf(co)]; },
+  set(x, mkt){ const m = mkt || VIEW_MKT;
+          this[m] = clamp(+x||0, 0, 20);
+          if(window.FB && FB.on) FB.setRate(this.KR, this.US);
           renderRate(); },
   /* 적정가 표류에 얹는 몫. 중립을 2.5% 로 본다. */
-  drag(){ return -(this.v - 2.5) * 0.000045; },
+  drag(co){ return -(this.of(co) - 2.5) * 0.000045; },
   /* 매수 문턱 가산. 금리가 높으면 굳이 위험을 안 진다. */
-  bar(){  return  (this.v - 2.5) * 0.020; }
+  bar(co){  return  (this.of(co) - 2.5) * 0.020; }
 };
 
 /* ── 두 시장 ────────────────────────────────────────────
    NOSPI = 정규시장(대형·중견), NONEX = 성장시장(소형·신규).
    신규 상장은 NONEX 에서 시작하고, 기준을 채우면 NOSPI 로 승급한다.
    기준을 못 채우면 강등, 최저선도 못 지키면 상장폐지된다. */
-const BOARDS = {
-  NOSPI:  { label:'정규시장', mark:'P', cap: 3.0e11, price: 3000 },
-  NOSDAQ: { label:'코스닥',   mark:'D', cap: 8.0e10, price: 1000 },
-  NONEX:  { label:'성장시장', mark:'X', cap: 2.0e10, price:  500 }
+/* 두 거래소. 한국은 원화, 미국은 달러로 호가한다.
+   상장 기준은 각자의 통화 기준이며, 등급(대형주/잡주) 판정만
+   원화 환산 시가총액으로 통일한다. */
+const MARKETS = {
+  KR: { label:'한국거래소', flag:'KR', cur:'₩', lang:'ko',
+        ladder:['NOSPI','NOSDAQ','NONEX'],
+        delist:{ cap: 4.0e9, price: 100 } },
+  US: { label:'US Markets', flag:'US', cur:'$', lang:'en',
+        ladder:['NYSE','NASDAQ','NYSEA'],
+        delist:{ cap: 3.0e6, price: 1 } }
 };
-/* 위에서부터 높은 시장. 심사는 이 순서로 훑는다. */
-const LADDER = ['NOSPI','NOSDAQ','NONEX'];
-const DELIST = { cap: 4.0e9, price: 100 };   // 이 밑이면 상장폐지 대상
-const GRACE  = 6;                            // 관리종목 유예 (심사 6회)
 
-const boardOf = co => BOARDS[co.board] ? co.board : 'NONEX';
-const rankOf  = co => LADDER.indexOf(boardOf(co));   // 0 이 가장 높다
+const BOARDS = {
+  NOSPI:  { mkt:'KR', label:'정규시장',     mark:'P', cap: 3.0e11, price: 3000 },
+  NOSDAQ: { mkt:'KR', label:'코스닥',       mark:'D', cap: 8.0e10, price: 1000 },
+  NONEX:  { mkt:'KR', label:'성장시장',     mark:'X', cap: 2.0e10, price:  500 },
+  NYSE:   { mkt:'US', label:'Big Board',    mark:'Y', cap: 2.0e8,  price:    4 },
+  NASDAQ: { mkt:'US', label:'NASDAQ',       mark:'Q', cap: 6.0e7,  price:    2 },
+  NYSEA:  { mkt:'US', label:'NYSE American',mark:'A', cap: 1.5e7,  price:    1 }
+};
+const GRACE = 6;                             // 관리종목 유예 (심사 6회)
 
-/* 지금 실적으로 갈 수 있는 가장 높은 시장. 못 가면 null. */
+const mktOf   = co => (co.country||'KR').toUpperCase()==='US' ? 'US' : 'KR';
+const curOf   = co => MARKETS[mktOf(co)].cur;
+/* 원화 환산 배수. 미국 종목은 달러 호가라 지갑·등급 판정에 환율을 곱한다. */
+const fxOf    = co => mktOf(co)==='US' ? S.fx : 1;
+
+/* 시가총액 표기. 원 단위 숫자를 그대로 쓰면 자릿수를 못 읽는다. */
+const capOf  = co => co.shares * co.price;
+const capKRW = co => capOf(co) * fxOf(co);      // 등급 판정은 원화 환산으로 통일
+
+const capKo = v =>
+  v >= 1e12 ? (v/1e12).toFixed(v>=1e13?0:1) + '조'
+: v >= 1e8  ? Math.round(v/1e8).toLocaleString() + '억'
+: v >= 1e4  ? Math.round(v/1e4).toLocaleString() + '만'
+:             Math.round(v).toLocaleString();
+const capEn = v =>
+  v >= 1e12 ? '$'+(v/1e12).toFixed(2)+'T'
+: v >= 1e9  ? '$'+(v/1e9).toFixed(2)+'B'
+: v >= 1e6  ? '$'+(v/1e6).toFixed(1)+'M'
+:             '$'+Math.round(v).toLocaleString();
+
+const capStr = (v, mkt) => mkt==='US' ? capEn(v) : capKo(v);
+const capOfStr = co => capStr(capOf(co), mktOf(co));
+/* 호가 표기. 달러는 소수 둘째 자리까지 쓴다. */
+const pxStr = co => mktOf(co)==='US'
+  ? '$' + co.price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})
+  : Math.round(co.price).toLocaleString();
+
+const ladderOf = co => MARKETS[mktOf(co)].ladder;
+const boardOf = co => (BOARDS[co.board] && BOARDS[co.board].mkt===mktOf(co))
+                    ? co.board : ladderOf(co)[2];
+const rankOf  = co => ladderOf(co).indexOf(boardOf(co));   // 0 이 가장 높다
+
+/* 지금 실적으로 갈 수 있는 가장 높은 시장. 자기 거래소 안에서만 찾는다. */
 function bestBoard(co){
   const cap = co.shares*co.price, px = co.price;
-  return LADDER.find(k => cap >= BOARDS[k].cap && px >= BOARDS[k].price) || null;
+  return ladderOf(co).find(k => cap >= BOARDS[k].cap && px >= BOARDS[k].price) || null;
 }
 
 /* 지수 하나를 만든다. 두 시장이 완전히 같은 규칙으로 돌아가므로
@@ -743,17 +807,21 @@ function makeIndex(code){
   };
 }
 
-const NOSPI  = makeIndex('NOSPI');
-const NOSDAQ = makeIndex('NOSDAQ');
-const NONEX  = makeIndex('NONEX');
-const INDICES = { NOSPI, NOSDAQ, NONEX };
+const INDICES = Object.fromEntries(Object.keys(BOARDS).map(k => [k, makeIndex(k)]));
+const NOSPI = INDICES.NOSPI, NOSDAQ = INDICES.NOSDAQ, NONEX = INDICES.NONEX;
+const NYSE  = INDICES.NYSE,  NASDAQ = INDICES.NASDAQ, NYSEA  = INDICES.NYSEA;
+
+/* 지금 보고 있는 거래소. 화면을 갈아끼우는 기준이다. */
+const boardsOf = m => MARKETS[m].ladder;
 
 /* 지수를 가상 종목처럼 감싼다. 차트·드로잉 코드를 그대로 쓰기 위한 껍데기다.
    가격은 계산값이므로 getter 로 노출한다. */
 function makeIdxShell(ix){
   return {
     id:ix.code, name:ix.code, ticker:ix.code, country:'—', img:'',
-    desc:`${BOARDS[ix.code].label} 상장 종목의 시가총액 가중 지수`,
+    desc: BOARDS[ix.code].mkt==='US'
+      ? `Cap-weighted index of ${BOARDS[ix.code].label} listings`
+      : `${BOARDS[ix.code].label} 상장 종목의 시가총액 가중 지수`,
     owner:'', shares:0, index:true, limit:null, fair:0, mom:0, ref:null,
     get price(){ return ix.value(); },
     get prev(){  return ix.prev || 1000; },
@@ -822,13 +890,17 @@ function review(){
 
   S.companies.slice().forEach(co => {
     const cap = co.shares*co.price, px = co.price;
+    const dl  = MARKETS[mktOf(co)].delist;      // 폐지 기준은 거래소마다 다르다
 
     // 1) 최저선 미달 — 관리종목 지정 후 유예가 끝나면 상장폐지
-    if(cap < DELIST.cap || px < DELIST.price){
+    if(cap < dl.cap || px < dl.price){
       co.warn = (co.warn||0) + 1;
-      if(co.warn === 1) notice(co, `${co.name}, 관리종목 지정 — 상장폐지 기준 미달`);
+      const e0 = mktOf(co)==='US';
+      if(co.warn === 1) notice(co, e0 ? `${co.name} flagged for delisting`
+                                      : `${co.name}, 관리종목 지정 — 상장폐지 기준 미달`);
       else if(co.warn >= GRACE){
-        notice(co, `${co.name}, 상장폐지 확정 — 시가총액·주가 최저 기준 미달`);
+        notice(co, e0 ? `${co.name} delisted — failed minimum listing standards`
+                      : `${co.name}, 상장폐지 확정 — 시가총액·주가 최저 기준 미달`);
         delistCompany(co.id);
       }
       return;
@@ -838,19 +910,23 @@ function review(){
     const best = bestBoard(co) || 'NONEX';
 
     // 2) 승급은 즉시. 두 계단을 한 번에 뛰어오를 수도 있다.
-    if(LADDER.indexOf(best) < LADDER.indexOf(now)){
+    const L = ladderOf(co), en = mktOf(co)==='US';
+    if(L.indexOf(best) < L.indexOf(now)){
       moveBoard(co, best);
-      notice(co, `${co.name}, ${best} 이전상장 — ${BOARDS[best].label} 요건 충족`);
+      notice(co, en ? `${co.name} uplisted to ${best}`
+                    : `${co.name}, ${best} 이전상장 — ${BOARDS[best].label} 요건 충족`);
       co.warn = 0; return;
     }
 
     // 3) 강등은 유예를 준다. 순간 등락으로 바로 떨어뜨리면 가혹하다.
-    if(LADDER.indexOf(best) > LADDER.indexOf(now)){
+    if(L.indexOf(best) > L.indexOf(now)){
       co.warn = (co.warn||0) + 1;
-      if(co.warn === 1) notice(co, `${co.name}, 관리종목 지정 — ${now} 요건 미달`);
+      if(co.warn === 1) notice(co, en ? `${co.name} flagged — below ${now} standards`
+                                      : `${co.name}, 관리종목 지정 — ${now} 요건 미달`);
       else if(co.warn >= GRACE){
         moveBoard(co, best);
-        notice(co, `${co.name}, ${best} 강등 — ${now} 요건 회복 실패`);
+        notice(co, en ? `${co.name} moved down to ${best}`
+                      : `${co.name}, ${best} 강등 — ${now} 요건 회복 실패`);
         co.warn = 0;
       }
       return;
@@ -874,7 +950,8 @@ function moveBoard(co, to){
 /* 심사 결과는 소식통에 공시로 남긴다. 조용히 바뀌면 아무도 모른다. */
 function notice(co, title){
   toast(title);
-  post({ cid: co.id, src:'공시', by:'거래소', title, body:'',
+  post({ cid: co.id, src: mktOf(co)==='US'?'NOTICE':'공시',
+         by: mktOf(co)==='US'?'Exchange':'거래소', title, body:'',
          impact: 0, horizon:'mid', confidence:0.5, volatility:1 });
 }
 
@@ -906,6 +983,7 @@ const MAINT      = 0.15;      // 유지증거금 15%. 밑으로 내려가면 강
 const LIMIT      = 0.30;      // 상하한가 ±30%
 const DAY_BARS   = 90;        // 기준가 갱신 주기 (캔들 90개 = 실시간 12분)
 
+let VIEW_MKT = 'KR';        // 지금 보고 있는 거래소
 let reviewDue = false;      // 세션이 바뀌면 상장 심사를 돌린다
 
 const MAX_PUSH = 0.012;      // 한 틱 최대 1.2%. 캔들당 16틱이라 이것도 넉넉하다
@@ -1121,30 +1199,35 @@ function open(side){
 
   const imp    = slip(co,q);
   const fill   = co.price*(1 + (side==='long'? imp : -imp));
-  const margin = fill*q/lev;
-  const fee    = fill*q*FEE_RATE;
+  /* 지갑은 원화 하나뿐이다. 미국 종목은 달러 호가라 환율로 바꿔 받는다.
+     진입 환율을 포지션에 남겨야 나중에 환차손익이 제대로 잡힌다. */
+  const fx     = fxOf(co);
+  const margin = fill*q*fx/lev;
+  const fee    = fill*q*fx*FEE_RATE;
   if(margin+fee > S.me.cash) return toast('증거금이 부족합니다');
   S.me.cash -= margin+fee;
-  S.positions.push({id:uid(),cid:co.id,side,qty:q,entry:fill,lev,margin});
+  S.positions.push({id:uid(),cid:co.id,side,qty:q,entry:fill,lev,margin,fx});
 
-  co.price = Math.max(1, co.price*(1 + (side==='long'? imp : -imp)*0.6));
-  if(imp>0.004) toast(`체결 ${won(fill)} · 물량이 커서 ${(imp*100).toFixed(2)}% 밀렸습니다`);
+  co.price = Math.max(0.01, co.price*(1 + (side==='long'? imp : -imp)*0.6));
+  if(imp>0.004) toast(`체결 ${curOf(co)}${fill.toFixed(2)} · 물량이 커서 ${(imp*100).toFixed(2)}% 밀렸습니다`);
   persist(); syncMe(); renderPos(); renderWallet();
-  toast(`${side==='long'?'롱':'숏'} ${q}주 · ${won(co.price)}`);
+  toast(`${side==='long'?'롱':'숏'} ${q}주 · ${pxStr(co)}`);
 }
 function close(pid){
   const i=S.positions.findIndex(p=>p.id===pid); if(i<0) return;
   const p=S.positions[i], co=S.companies.find(c=>c.id===p.cid);
   const imp  = slip(co,p.qty);
   const fill = co.price*(1 + (p.side==='long'? -imp : imp));   // 청산은 반대 방향으로 밀린다
-  const pnl  = (fill-p.entry)*p.qty*(p.side==='long'?1:-1);
-  const cost = fill*p.qty*(FEE_RATE+TAX_RATE);
+  const fx   = fxOf(co);
+  const pnl  = (fill-p.entry)*p.qty*(p.side==='long'?1:-1) * fx;
+  const cost = fill*p.qty*fx*(FEE_RATE+TAX_RATE);
   S.me.cash += Math.max(0, p.margin + pnl - cost);
-  co.price = Math.max(1, co.price*(1 + (p.side==='long'? -imp : imp)*0.6));
+  co.price = Math.max(0.01, co.price*(1 + (p.side==='long'? -imp : imp)*0.6));
   S.positions.splice(i,1); persist(); syncMe(); renderPos(); renderWallet();
   toast('청산 완료');
 }
-const pnlOf=(p,co)=> !co?0:(co.price-p.entry)*p.qty*(p.side==='long'?1:-1);
+/* 평가손익은 원화 기준. 미국 종목은 환율이 움직여도 손익이 바뀐다. */
+const pnlOf=(p,co)=> !co?0:(co.price-p.entry)*p.qty*(p.side==='long'?1:-1)*fxOf(co);
 
 /* 강제 청산. 레버리지를 쓰는데 청산이 없으면 손실 한도가 없어서
    레버리지가 사실상 공짜가 된다. 증거금 유지율이 깨지면 잘라낸다. */
@@ -1163,11 +1246,13 @@ function checkLiq(){
    6. 렌더
    ═══════════════════════════════════════════════════════ */
 function renderCos(){
+  const rows0 = S.companies.filter(c=>mktOf(c)===VIEW_MKT);
   const el=document.getElementById('coList');
-  if(!S.companies.length){
+  if(!rows0.length){
     el.innerHTML='<div class="empty">상장된 기업이 없습니다.<br>[+ 신규]로 첫 기업을 만드세요.</div>'; return;
   }
-  const idxRow = Object.entries(INDICES).map(([code,ix])=>{
+  const idxRow = boardsOf(VIEW_MKT).map(code=>{
+    const ix=INDICES[code];
     const v=ix.value(), p=ix.prev||1000, d=(v-p)/p*100;
     const on = S.sel && S.sel.index && S.sel.id===code;
     return `<div class="co idx ${on?'on':''}" data-id="${code}">
@@ -1181,8 +1266,13 @@ function renderCos(){
   /* 주가가 높은 순으로 세운다. S.companies 자체를 정렬하면 방송·저장
      순서까지 흔들리므로, 그리기용 사본만 정렬한다. */
   /* 정규시장을 위에, 성장시장을 아래에. 각각 주가 높은 순. */
-  const rows = S.companies.slice().sort((a,b)=>
-    rankOf(a)!==rankOf(b) ? rankOf(a)-rankOf(b) : b.price-a.price);
+  /* 순위는 시가총액이 기본이다. 주가는 액면가에 따라 달라지는 숫자라
+     회사 크기를 나타내지 못한다. 시장 등급이 먼저, 그 안에서 정렬 기준. */
+  const keyf = { cap: c=>capOf(c),
+                 price: c=>c.price,
+                 chg: c=>(c.price-c.prev)/c.prev }[S.sort] || (c=>capOf(c));
+  const rows = S.companies.filter(c=>mktOf(c)===VIEW_MKT).sort((a,b)=>
+    rankOf(a)!==rankOf(b) ? rankOf(a)-rankOf(b) : keyf(b)-keyf(a));
 
   el.innerHTML = idxRow + rows.map(c=>{
     const d=(c.price-c.prev)/c.prev*100, k=d>0.02?'up':d<-0.02?'dn':'flat';
@@ -1192,13 +1282,19 @@ function renderCos(){
       <div class="nm"><b>${c.name}</b><small>${c.ticker} · ${boardOf(c)} ·
         <span class="tier t${TIERS.indexOf(tierOf(c))}">${tierOf(c)[0]}</span>${
         c.warn ? `<span class="tier warn">관리 ${c.warn}/${GRACE}</span>` : ''}</small></div>
-      <div class="pr mono ${k}"><b>${Math.round(c.price).toLocaleString()}</b>${d>=0?'+':''}${d.toFixed(2)}%</div>
+      <div class="pr mono ${k}"><b>${pxStr(c)}</b>${d>=0?'+':''}${d.toFixed(2)}%
+        <span class="cap">${capOfStr(c)}</span></div>
     </div>`;
   }).join('');
   el.querySelectorAll('.co').forEach(n=>n.onclick=()=>select(n.dataset.id));
 }
 function select(id){
   S.sel = IDX[id] || S.companies.find(c=>c.id===id);
+  // 다른 거래소 종목을 고르면 화면도 그쪽으로 넘어간다
+  if(S.sel && !S.sel.index && mktOf(S.sel)!==VIEW_MKT){
+    VIEW_MKT = mktOf(S.sel); DB.set('mkt', VIEW_MKT);
+    renderMktTabs(); renderIdxBar(); renderRate();
+  }
   VIEW={n:110,off:0}; renderCos(); renderHead(); renderNews(); fit(); paint();
 }
 /* 호스트 빌드 불일치 경고. 시세를 만드는 창이 낡았으면
@@ -1230,18 +1326,46 @@ function renderRate(){
   const el = document.getElementById('rate'); if(!el) return;
   el.textContent = RATE.v.toFixed(2) + '%';
   el.style.color = RATE.v > 4 ? 'var(--fall)' : RATE.v < 1.5 ? 'var(--rise)' : '';
+  el.previousSibling && (el.previousSibling.textContent =
+    VIEW_MKT==='US' ? 'Fed Funds ' : '기준금리 ');
+}
+
+/* 거래소 탭. 지수 막대와 종목 목록이 통째로 갈아끼워진다. */
+function renderMktTabs(){
+  const el = document.getElementById('mktTabs'); if(!el) return;
+  el.innerHTML = Object.entries(MARKETS).map(([k,m])=>
+    `<button data-m="${k}" class="${VIEW_MKT===k?'on':''}">${m.flag}</button>`).join('');
+  el.querySelectorAll('button').forEach(b => b.onclick = () => switchMkt(b.dataset.m));
+}
+
+function switchMkt(m){
+  if(!MARKETS[m] || VIEW_MKT===m) return;
+  VIEW_MKT = m; DB.set('mkt', m);
+  const first = S.companies.find(c => mktOf(c)===m);
+  S.sel = IDX[boardsOf(m)[0]] || (first || null);
+  VIEW = {n:110, off:0};
+  renderMktTabs(); renderIdxBar(); renderCos(); renderHead();
+  renderNews(); renderRate(); fit(); paint();
+}
+
+/* 지수 막대는 보고 있는 거래소 것만 띄운다. 여섯 개를 다 걸면 읽히지 않는다. */
+function renderIdxBar(){
+  const el = document.getElementById('idxBar'); if(!el) return;
+  el.innerHTML = boardsOf(VIEW_MKT).map(code =>
+    `<div>${code} <b id="ix_${code}" class="mono">1,000.00</b>
+     <b id="ixd_${code}" class="mono" style="font-size:10px"></b></div>`).join('');
 }
 
 function renderNospi(){
-  Object.entries(INDICES).forEach(([code,ix])=>{
-    const id = code.toLowerCase();
-    const el = document.getElementById(id); if(!el) return;
+  boardsOf(VIEW_MKT).forEach(code=>{
+    const ix = INDICES[code];
+    const el = document.getElementById('ix_'+code); if(!el) return;
     const v = ix.value(), p = ix.prev || 1000, d = (v-p)/p*100;
     el.textContent = v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
     el.style.color = d>0.02?'var(--rise)':d<-0.02?'var(--fall)':'';
-    const dl = document.getElementById(id+'D');
-    dl.textContent = (d>=0?'▲':'▼') + Math.abs(d).toFixed(2) + '%';
-    dl.style.color = el.style.color || 'var(--ink-dim)';
+    const dl = document.getElementById('ixd_'+code);
+    if(dl){ dl.textContent = (d>=0?'▲':'▼') + Math.abs(d).toFixed(2) + '%';
+            dl.style.color = el.style.color || 'var(--ink-dim)'; }
   });
   renderRate();
 }
@@ -1275,12 +1399,15 @@ function renderHead(){
     if(co.index){ tt.textContent=BOARDS[co.id].label; tt.className='tier t0'; }
     else { const tr=tierOf(co); tt.textContent=tr[0]; tt.className='tier t'+TIERS.indexOf(tr); }
   }
+  const capEl=document.getElementById('cCap');
+  if(capEl) capEl.textContent = co.index ? ''
+    : (mktOf(co)==='US' ? 'Mkt Cap ' : '시총 ') + capOfStr(co);
   const d=(co.price-co.prev)/co.prev*100;
   document.getElementById('cName').textContent =
     co.index ? 'NOSPI 종합주가지수' : `${co.name} (${co.ticker})`;
   document.getElementById('cPrice').textContent = co.index
     ? co.price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})
-    : Math.round(co.price).toLocaleString();
+    : pxStr(co);
   const chg=document.getElementById('cChg');
   chg.textContent=`${d>=0?'▲':'▼'} ${Math.abs(d).toFixed(2)}%`;
   chg.className='mono '+(d>=0?'up':'dn');
@@ -1308,16 +1435,28 @@ function renderPos(){
 }
 function renderNews(){
   const el=document.getElementById('newsList');
-  const list=S.news.filter(n=>!S.sel||S.sel.index||n.cid===S.sel.id||n.cid==='*').slice(0,40);
+  const inScope = n => {
+    const c = String(n.cid);
+    if(!c.startsWith('*')) { const co=S.companies.find(x=>x.id===n.cid);
+                             return co ? mktOf(co)===VIEW_MKT : true; }
+    return c === '*' || c.slice(1) === VIEW_MKT;
+  };
+  const list=S.news.filter(n=> inScope(n) &&
+    (!S.sel || S.sel.index || n.cid===S.sel.id || String(n.cid).startsWith('*'))).slice(0,40);
   if(!list.length){ el.innerHTML='<div class="empty">아직 소식이 없습니다</div>'; return; }
   el.innerHTML=list.map(n=>{
-    const cls=n.src==='젬민이'?'gem':n.src==='매크로'?'macro':n.src==='뉴스'?'wire':n.src==='공시'?'ann':'ceo';
+    const cls=(n.src==='젬민이'||n.src==='Gemini')?'gem'
+            :(n.src==='매크로'||n.src==='MACRO')?'macro'
+            :n.src==='뉴스'?'wire':(n.src==='공시'||n.src==='NOTICE')?'ann':'ceo';
     const im=n.impact??0;
-    const co = n.cid==='*' ? null : S.companies.find(c=>c.id===n.cid);
-    const target = n.cid==='*' ? '전 종목' : (co ? co.name : '상장폐지된 기업');
+    const isAll = String(n.cid).startsWith('*');
+    const co = isAll ? null : S.companies.find(c=>c.id===n.cid);
+    const target = isAll
+      ? (n.cid==='*' ? '전 세계' : n.cid==='*US' ? 'US 전 종목' : '한국 전 종목')
+      : (co ? co.name : '상장폐지된 기업');
     const mixF = n.horizon==='short' ? 0.22 : n.horizon==='long' ? 0.78 : 0.50;
     const reach = co ? tierOf(co)[4] : 0.6;
-    const est = im*(n.confidence??0.7)*mixF*reach*(n.cid==='*'?0.45:1)*100;
+    const est = im*(n.confidence??0.7)*mixF*reach*(isAll?0.45:1)*100;
     const life = n.horizon==='short' ? '단기 재료' : n.horizon==='long' ? '장기 재료' : '중기 재료';
     const effect = n.pending ? ''
       : `<div class="eff">${esc(target)} · ${life} ·
@@ -1351,6 +1490,17 @@ function openModal(title, bodyHTML, onOk, okLabel='확인'){
   modal.querySelector('#no').onclick=shut;
   modal.querySelector('#yes').onclick=()=>{ if(onOk()!==false) shut(); };
 }
+
+const SORTS = [['cap','시총순'],['price','주가순'],['chg','등락순']];
+document.getElementById('sortBy').onclick=()=>{
+  const i = SORTS.findIndex(x=>x[0]===S.sort);
+  const nx = SORTS[(i+1) % SORTS.length];
+  S.sort = nx[0]; DB.set('sort', S.sort);
+  document.getElementById('sortBy').textContent = nx[1];
+  renderCos();
+};
+document.getElementById('sortBy').textContent =
+  (SORTS.find(x=>x[0]===S.sort)||SORTS[0])[1];
 
 document.getElementById('newCo').onclick=()=>{
   if(!S.me.admin) return toast('관리자만 기업을 만들 수 있습니다');
@@ -1563,7 +1713,7 @@ document.getElementById('newWire').onclick=()=>{
     const b=modal.querySelector('#w_b').value.trim();
     if(!t){ toast('제목을 입력하세요'); return false; }
     S.me.lastWire = Date.now();
-    post({cid:'*', src:'뉴스', by:S.me.name, title:t, body:b});
+    post({cid:'*'+VIEW_MKT, src:'뉴스', by:S.me.name, title:t, body:b});
   },'내보내기');
 };
 
@@ -1632,7 +1782,8 @@ document.getElementById('adminBtn').onclick=()=>{
 
     <hr style="border:none;border-top:1px solid var(--rule)">
 
-    <div class="fld"><label>기준금리 — 현재 ${RATE.v.toFixed(2)}%</label>
+    <div class="fld"><label>${VIEW_MKT==='US'?'Fed Funds':'한국 기준금리'} — 현재 ${RATE.v.toFixed(2)}%
+      <span style="opacity:.6">(KR ${RATE.KR.toFixed(2)}% · US ${RATE.US.toFixed(2)}%)</span></label>
       <div style="display:flex;gap:6px;align-items:center">
         <input id="a_rate" type="number" step="0.25" min="0" max="20" value="${RATE.v}"
                style="flex:1">
@@ -1645,12 +1796,14 @@ document.getElementById('adminBtn').onclick=()=>{
 
     <div class="fld"><label>상장 기준</label>
       <div style="font-size:10px;color:var(--ink-dim);line-height:1.8">
-        <b style="color:var(--ink)">NOSPI 정규시장</b> — 시총 3,000억 이상 · 주가 3,000원 이상<br>
-        <b style="color:var(--ink)">NOSDAQ 코스닥</b> — 시총 800억 이상 · 주가 1,000원 이상<br>
-        <b style="color:var(--ink)">NONEX 성장시장</b> — 시총 200억 이상 · 주가 500원 이상<br>
-        <b style="color:var(--fall)">상장폐지</b> — 시총 40억 미만 또는 주가 100원 미만<br>
-        신규 상장은 NONEX 에서 시작합니다. 세션마다 심사하며,
-        미달이 ${GRACE}회 이어지면 강등 또는 폐지됩니다.</div></div>
+        <b style="color:var(--ink)">한국거래소</b><br>
+        NOSPI 3,000억·3,000원 / NOSDAQ 800억·1,000원 / NONEX 200억·500원<br>
+        폐지 40억 미만 또는 100원 미만<br>
+        <b style="color:var(--ink);display:inline-block;margin-top:5px">US Markets</b><br>
+        NYSE $200M·$4 / NASDAQ $60M·$2 / NYSE American $15M·$1<br>
+        폐지 $3M 미만 또는 $1 미만<br>
+        국적을 <b>US</b> 로 적으면 규모에 따라 NASDAQ 또는 NYSE American 에 상장됩니다.
+        NYSE 는 승급으로만 올라갑니다. 미달이 ${GRACE}회 이어지면 강등 또는 폐지됩니다.</div></div>
 
     <hr style="border:none;border-top:1px solid var(--rule)">
 
@@ -1715,8 +1868,8 @@ document.getElementById('adminBtn').onclick=()=>{
   modal.querySelector('#a_rateSet').onclick = e => {
     e.preventDefault();
     if(!S.me.admin) return toast('관리자만 조작할 수 있습니다');
-    RATE.set(modal.querySelector('#a_rate').value);
-    toast(`기준금리 ${RATE.v.toFixed(2)}% 적용`);
+    RATE.set(modal.querySelector('#a_rate').value, VIEW_MKT);
+    toast(`${VIEW_MKT} 기준금리 ${RATE.v.toFixed(2)}% 적용`);
     shut();
   };
 
@@ -1782,7 +1935,10 @@ window.pushNews = post;
 
 function fire(n){
   // 예전 빌드가 매크로 기사에 특정 기업을 붙여놓은 경우가 있다. 되돌린다.
-  if(n.src === '매크로' && n.cid !== '*') n.cid = '*';
+  if((n.src==='매크로'||n.src==='MACRO') && !String(n.cid).startsWith('*')){
+    const co = S.companies.find(c=>c.id===n.cid);
+    n.cid = co ? '*'+mktOf(co) : '*';
+  }
   if(!isEngine()) return;              // 게스트는 시세를 만들지 않는다
   if(n.fired) return;                  // 같은 뉴스를 두 번 반영하지 않는다
   if(!MK.open()){ n.held = true; return; }   // 마감 중 — 개장 시가에 한꺼번에 터진다
@@ -1790,7 +1946,14 @@ function fire(n){
   const v={impact:n.impact,horizon:n.horizon,
            confidence:n.confidence,volatility:n.volatility};
 
-  if(n.cid==='*'){
+  /* '*' 는 전 세계, '*KR'/'*US' 는 그 거래소 전 종목을 뜻한다. */
+  if(String(n.cid).startsWith('*')){
+    const scope = n.cid.slice(1);
+    const targets = scope ? S.companies.filter(c=>mktOf(c)===scope) : S.companies;
+    targets.forEach(co => applyNews(co, {...v, confidence:(v.confidence??.7)*0.45}));
+    return;
+  }
+  if(false){
     /* 시장 전체 뉴스. 개별 기업 뉴스보다 약하게 먹인다 —
        한 사람이 전 종목을 동시에 흔들 수 있는 글이라,
        같은 세기로 주면 이게 유일한 무기가 된다. */
@@ -1942,6 +2105,8 @@ setInterval(()=>{
 
 /* 초기 부팅 */
 if(!window.FIREBASE_CONFIG) S.me.admin = true;   // 로컬 단독 실행이면 혼자 다 한다
+VIEW_MKT = DB.get('mkt','KR');
+renderMktTabs(); renderIdxBar();
 loadCandles();
 fit(); if(S.companies.length) select(S.companies[0].id); renderWallet(); renderPos();
 </script>
