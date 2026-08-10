@@ -124,6 +124,7 @@ const Gem = {
         by: n.by || '',
         // CEO 기고와 유저 뉴스만 검증 대상이다. 매크로·젬민이 기사는 제외.
         cid: n.cid,
+        mkt: (()=>{ const c=S.companies.find(x=>x.id===n.cid); return c?mktOf(c):'KR'; })(),
         /* 대상 기업을 다시 정할 수 있는 기사는 '뉴스'뿐이다.
            CEO 기고는 자기 회사로 고정이고, 매크로는 정의상 시장 전체다. */
         pick: (n.src === '뉴스') ? 1 : 0,
@@ -137,7 +138,7 @@ const Gem = {
 
     // 대상 기업을 고르게 하려면 명단을 줘야 한다
     const roster = S.companies.map(c =>
-      `${c.id} | ${c.name} | ${c.ticker} | ${c.country} | ${(c.desc||'').slice(0,40)}`
+      `${c.id} | ${c.name} | ${c.ticker} | ${c.country} | ${boardOf(c)} | ${(c.desc||'').slice(0,40)}`
     ).join('\n') || '(상장 종목 없음)';
 
     /* 채점과 젬민이 감사를 한 콜에 합쳤다.
@@ -199,8 +200,10 @@ ${feed}`;
     (d.rebuttals || []).slice(0,3).forEach(r => {
       const src = pend.find(n => n.id === r.id);
       if(!src || !r.title) return;
+      const tco = S.companies.find(c => c.id === src.cid);
+      const en  = tco ? mktOf(tco)==='US' : String(src.cid).includes('US');
       window.pushNews({
-        cid: src.cid, src:'젬민이', by:'탐사보도',
+        cid: src.cid, src: en ? 'Gemini' : '젬민이', by: en ? 'Investigative' : '탐사보도',
         title: r.title, body: r.body || '',
         impact: clamp(r.impact ?? -0.3, -1, -0.15),
         /* 트집 기사는 확신도를 낮게 줘서 시장이 거의 안 움직이게 한다.
@@ -217,38 +220,57 @@ ${feed}`;
   /* ── 2) 매크로 — 국가 소식 + 환율 (Google 검색 사용) ──
      상장사가 있는 나라별로 1시간에 1콜. 결과는 소식통에 올라가고
      그 나라 기업 전체에 반영된다. */
+  /* 매크로는 나라마다 따로 뽑는다. 미국 것은 영어로 쓰고
+     미국 종목에만 먹인다. 한 번에 한 나라씩 번갈아 호출한다. */
+  macroTurn: 'KR',
+
   async macro(){
-    const countries = [...new Set(S.companies.map(c => c.country))];
-    if(!countries.length) return false;
-    const ctry = countries[(this.jobs.mi = (this.jobs.mi||0) + 1) % countries.length];
+    /* 나라를 번갈아 가며 뽑는다. 결과는 그 나라 전 종목에 먹인다.
+       예전에는 hits[0] 한 기업에만 꽂아서, 국가 뉴스가 엉뚱한
+       회사 하나만 흔드는 상태였다. */
+    const mkts = [...new Set(S.companies.map(c => mktOf(c)))];
+    if(!mkts.length) return false;
+    const mkt  = mkts[(this.jobs.mi = (this.jobs.mi||0) + 1) % mkts.length];
+    const ko   = mkt === 'KR';
+    const ctry = ko ? '대한민국' : '미국';
 
-    const prompt =
-`${ctry} 의 최근 24시간 경제·산업·규제 뉴스와 USD 대비 환율 동향을 검색해서 확인하라.
+    const prompt = ko ?
+`대한민국의 최근 24시간 경제·산업·규제 뉴스와 원/달러 환율 동향을 검색해서 확인하라.
 JSON만 출력한다. 설명 금지.
-{"fx":<USD 1단위당 현지통화 환율 숫자>,"fx_move":-1~1,"items":[{"headline":"한국어 한 문장","sector":"업종","impact":-1~1}]}
-items 는 최대 3개. 그 나라 상장사 주가에 실제로 영향이 있는 것만 고른다.
-fx_move 는 현지통화 약세면 음수, 강세면 양수다.`;
+{"fx":<USD 1달러당 원화 숫자>,"fx_move":-1~1,"items":[{"headline":"한국어 한 문장","impact":-1~1}]}
+items 는 최대 3개. 한국 증시 전반에 영향이 있는 것만 고른다.
+fx_move 는 원화 약세면 음수, 강세면 양수다.` :
 
-    const d = await this.json(this.cfg.kAud || this.cfg.kInv, prompt, { grounding:true, maxTokens: 800 });
+`Search for the last 24 hours of US economic, industry, and regulatory news,
+plus the Federal Reserve's policy stance and the dollar's direction.
+Output JSON only. No prose.
+{"rate":<current fed funds rate as a number, e.g. 4.25>,"items":[{"headline":"one sentence in English","impact":-1~1}]}
+At most 3 items. Only include news that moves the broad US market.
+Write every headline in English.`;
 
-    if(typeof d.fx === 'number' && d.fx > 0 && ctry !== 'US') S.fx = d.fx;
+    const d = await this.json(this.cfg.kAud || this.cfg.kInv, prompt,
+                              { grounding:true, maxTokens: 800 });
 
-    // 환율 충격: 대형주일수록 크게 맞는다
-    const fxm = d.fx_move || 0;
+    if(ko && typeof d.fx === 'number' && d.fx > 200) S.fx = d.fx;
+    if(!ko && typeof d.rate === 'number' && d.rate >= 0 && d.rate <= 20){
+      RATE.US = d.rate; renderRate();
+    }
+
+    // 환율 충격은 한국 종목에만. 대형주일수록 크게 맞는다.
+    const fxm = ko ? (d.fx_move || 0) : 0;
     if(Math.abs(fxm) > 0.1){
-      S.companies.filter(c => c.country === ctry).forEach(co => {
-        const size = Math.min(1.4, co.shares * co.price / 5e10);
-        applyNews(co, { impact: fxm * 0.45 * size, horizon:'long', confidence:.8, volatility:1.2 });
+      S.companies.filter(c => mktOf(c)==='KR').forEach(co => {
+        const size = Math.min(1.4, capKRW(co) / 5e10);
+        applyNews(co, { impact: fxm*0.45*size, horizon:'long', confidence:.8, volatility:1.2 });
       });
     }
 
     (d.items || []).slice(0,3).forEach(it => {
-      const hits = S.companies.filter(c => c.country === ctry);
-      const target = hits.find(c => (c.desc+c.name).includes(it.sector)) || hits[0];
-      if(!target) return;
+      if(!it.headline) return;
       window.pushNews({
-        cid: target.id, src:'매크로', by: ctry,
-        title: it.headline, body: `${ctry} 시장 동향. ${d.fx_note || ''}`.trim(),
+        cid: '*' + mkt, src: ko ? '매크로' : 'MACRO', by: ctry,
+        title: it.headline,
+        body: ko ? '국가 경제 동향' : 'US macro conditions',
         impact: clamp(it.impact || 0, -1, 1), horizon:'mid', confidence:.75
       });
     });
